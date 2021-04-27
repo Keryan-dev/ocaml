@@ -193,39 +193,42 @@ let transform_primitive (prim : L.primitive) args loc =
   | Psequor, [arg1; arg2] ->
     let const_true = Ident.create_local "const_true" in
     let cond = Ident.create_local "cond_sequor" in
-    L.Llet (Strict, Pgenval, const_true, Lconst (Const_base (Const_int 1)),
-      (L.Llet (Strict, Pgenval, cond, arg1,
-        switch_for_if_then_else
-          ~cond:(L.Lvar cond)
-          ~ifso:(L.Lvar const_true)
-          ~ifnot:arg2
-          (fun lam -> lam))))
+    Some
+      (L.Llet (Strict, Pgenval, const_true, Lconst (Const_base (Const_int 1)),
+        (L.Llet (Strict, Pgenval, cond, arg1,
+          switch_for_if_then_else
+            ~cond:(L.Lvar cond)
+            ~ifso:(L.Lvar const_true)
+            ~ifnot:arg2
+            (fun lam -> lam)))))
   | Psequand, [arg1; arg2] ->
     let const_false = Ident.create_local "const_false" in
     let cond = Ident.create_local "cond_sequand" in
-    L.Llet (Strict, Pgenval, const_false, Lconst (Const_base (Const_int 0)),
-      (L.Llet (Strict, Pgenval, cond, arg1,
-        switch_for_if_then_else
-          ~cond:(L.Lvar cond)
-          ~ifso:arg2
-          ~ifnot:(L.Lvar const_false)
-          (fun lam -> lam))))
+    Some
+      (L.Llet (Strict, Pgenval, const_false, Lconst (Const_base (Const_int 0)),
+        (L.Llet (Strict, Pgenval, cond, arg1,
+          switch_for_if_then_else
+            ~cond:(L.Lvar cond)
+            ~ifso:arg2
+            ~ifnot:(L.Lvar const_false)
+            (fun lam -> lam)))))
   | (Psequand | Psequor), _ ->
     Misc.fatal_error "Psequand / Psequor must have exactly two arguments"
   (* Removed. Should be safe, but will no longer catch misuses.
   | Pflambda_isint, _ ->
     Misc.fatal_error "[Pflambda_isint] should not exist at this stage" *)
   | Pisint, [arg] ->
-    switch_for_if_then_else
-      ~cond:(L.Lprim (Pflambda_isint, [arg], loc))
-      ~ifso:(L.Lconst (Const_base (Const_int 1)))
-      ~ifnot:(L.Lconst (Const_base (Const_int 0)))
-      (fun lam -> lam)
-  | (Pidentity | Pbytes_to_string | Pbytes_of_string), [arg] -> arg
+    Some
+      (switch_for_if_then_else
+        ~cond:(L.Lprim (Pflambda_isint, [arg], loc))
+        ~ifso:(L.Lconst (Const_base (Const_int 1)))
+        ~ifnot:(L.Lconst (Const_base (Const_int 0)))
+        (fun lam -> lam))
+  | (Pidentity | Pbytes_to_string | Pbytes_of_string), [arg] -> Some arg
   | Pignore, [arg] ->
     let ident = Ident.create_local "ignore" in
     let result = L.Lconst (Const_base (Const_int 0)) in
-    L.Llet (Strict, Pgenval, ident, arg, result)
+    Some (L.Llet (Strict, Pgenval, ident, arg, result))
   | Pdirapply, [funct; arg]
   | Prevapply, [arg; funct] ->
     let apply : L.lambda_apply =
@@ -240,22 +243,8 @@ let transform_primitive (prim : L.primitive) args loc =
         ap_specialised = Default_specialise;
       }
     in
-    L.Lapply apply
-  | _, _ ->
-     let prim, args, loc = simplify_primitive prim args loc in
-     L.Lprim (prim, args, loc)
-
-let primitive_needs_transform (prim : L.primitive) args =
-  (* test to filter optimization cases later on,
-     must sync with transform_primitive.
-     Cases leading to true MUST correspond to actual
-     constructor change when applied to transform_primitive *)
-  match prim, args with
-  | Psequor, _
-  | Psequand, _
-  | (Pisint | Pidentity | Pbytes_to_string | Pbytes_of_string | Pignore ), [_]
-  | (Pdirapply | Prevapply), [_; _] -> true
-  | _ -> false
+    Some (L.Lapply apply)
+  | _, _ -> None
 
 let rec cps_non_tail (lam : L.lambda) (k : Ident.t -> Ilambda.t)
           (k_exn : Continuation.t) : Ilambda.t =
@@ -334,24 +323,28 @@ let rec cps_non_tail (lam : L.lambda) (k : Ident.t -> Ilambda.t)
     (* This case avoids extraneous continuations. *)
     let body = cps_non_tail body k k_exn in
     I.Let (id, User_visible, value_kind, Simple (Const const), body)
-  | Llet (_let_kind, value_kind, id, Lprim (prim, args, loc), body)
-       when not (primitive_needs_transform prim args) ->
-    (* This case avoids extraneous continuations. *)
-    let prim, args, loc = simplify_primitive prim args loc in
-    let exn_continuation : I.exn_continuation option =
-      if L.primitive_can_raise prim then
-        Some {
-          exn_handler = k_exn;
-          extra_args = [];
-        }
-      else None
-    in
-    cps_non_tail_list args (fun args ->
-        let body = cps_non_tail body k k_exn in
-        I.Let (id, User_visible, value_kind,
-          Prim { prim; args; loc; exn_continuation; },
-          body))
-      k_exn
+  | Llet (let_kind, value_kind, id, Lprim (prim, args, loc), body) ->
+    begin match transform_primitive prim args loc with
+    | None ->
+      (* This case avoids extraneous continuations. *)
+      let prim, args, loc = simplify_primitive prim args loc in
+      let exn_continuation : I.exn_continuation option =
+        if L.primitive_can_raise prim then
+          Some {
+            exn_handler = k_exn;
+            extra_args = [];
+          }
+        else None
+      in
+      cps_non_tail_list args (fun args ->
+          let body = cps_non_tail body k k_exn in
+          I.Let (id, User_visible, value_kind,
+            Prim { prim; args; loc; exn_continuation; },
+            body))
+        k_exn
+    | Some lam ->
+      cps_non_tail (L.Llet (let_kind, value_kind, id, lam, body)) k k_exn
+    end
   | Llet (_let_kind, value_kind, id, defining_expr, body) ->
     let body = cps_non_tail body k k_exn in
     let after_defining_expr = Continuation.create () in
@@ -369,28 +362,29 @@ let rec cps_non_tail (lam : L.lambda) (k : Ident.t -> Ilambda.t)
     let bindings = List.map cps_function (check_let_rec_bindings bindings) in
     let body = cps_non_tail body k k_exn in
     Let_rec (List.combine idents bindings, body)
-  | Lprim (prim, args, loc) when primitive_needs_transform prim args ->
-     (* will loop forever if we're not cautious about the when test *)
-     cps_non_tail (transform_primitive prim args loc) k k_exn
   | Lprim (prim, args, loc) ->
-    let prim, args, loc = simplify_primitive prim args loc in
-    let name = Printlambda.name_of_primitive prim in
-    let result_var = Ident.create_local name in
-    let exn_continuation : I.exn_continuation option =
-      if L.primitive_can_raise prim then
-        Some {
-          exn_handler = k_exn;
-          extra_args = [];
-        }
-      else None
-    in
-    cps_non_tail_list args (fun args ->
-      I.Let (result_var,
-             Not_user_visible,
-             Pgenval,
-             Prim { prim; args; loc; exn_continuation; },
-             k result_var))
-      k_exn
+    begin match transform_primitive prim args loc with
+    | None ->
+      let prim, args, loc = simplify_primitive prim args loc in
+      let name = Printlambda.name_of_primitive prim in
+      let result_var = Ident.create_local name in
+      let exn_continuation : I.exn_continuation option =
+        if L.primitive_can_raise prim then
+          Some {
+            exn_handler = k_exn;
+            extra_args = [];
+          }
+        else None
+      in
+      cps_non_tail_list args (fun args ->
+          I.Let (result_var,
+            Not_user_visible,
+            Pgenval,
+            Prim { prim; args; loc; exn_continuation; },
+            k result_var))
+        k_exn
+    | Some lam -> cps_non_tail lam k k_exn
+    end
   | Lswitch (scrutinee,
       { sw_numconsts; sw_consts; sw_numblocks = _; sw_blocks; sw_failaction;
         sw_tags_to_sizes = _; }, _loc) ->
@@ -645,24 +639,28 @@ and cps_tail (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
     (* This case avoids extraneous continuations. *)
     let body = cps_tail body k k_exn in
     I.Let (id, User_visible, value_kind, Simple (Const const), body)
-  | Llet (_let_kind, value_kind, id, Lprim (prim, args, loc), body)
-       when not (primitive_needs_transform prim args) ->
-    (* This case avoids extraneous continuations. *)
-    let prim, args, loc = simplify_primitive prim args loc in
-    let exn_continuation : I.exn_continuation option =
-      if L.primitive_can_raise prim then
-        Some {
-          exn_handler = k_exn;
-          extra_args = [];
-        }
-      else None
-    in
-    cps_non_tail_list args (fun args ->
-        let body = cps_tail body k k_exn in
-        I.Let (id, User_visible, value_kind,
-          Prim { prim; args; loc; exn_continuation; },
-          body))
-      k_exn
+  | Llet (let_kind, value_kind, id, Lprim (prim, args, loc), body) ->
+    begin match transform_primitive prim args loc with
+    | None ->
+      (* This case avoids extraneous continuations. *)
+      let prim, args, loc = simplify_primitive prim args loc in
+      let exn_continuation : I.exn_continuation option =
+        if L.primitive_can_raise prim then
+          Some {
+            exn_handler = k_exn;
+            extra_args = [];
+          }
+        else None
+      in
+      cps_non_tail_list args (fun args ->
+          let body = cps_tail body k k_exn in
+          I.Let (id, User_visible, value_kind,
+            Prim { prim; args; loc; exn_continuation; },
+            body))
+        k_exn
+    | Some lam ->
+       cps_tail (L.Llet (let_kind, value_kind, id, lam, body)) k k_exn
+    end
   | Llet (_let_kind, _value_kind, id, Lassign (being_assigned, new_value),
       body) ->
     (* This case is also to avoid extraneous continuations in code that
@@ -690,26 +688,27 @@ and cps_tail (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
     let bindings = List.map cps_function (check_let_rec_bindings bindings) in
     let body = cps_tail body k k_exn in
     Let_rec (List.combine idents bindings, body)
-  | Lprim (prim, args, loc) when primitive_needs_transform prim args ->
-     (* will loop forever if we're not cautious about the when test *)
-     cps_tail (transform_primitive prim args loc) k k_exn
   | Lprim (prim, args, loc) ->
-    (* CR mshinwell: Arrange for "args" to be named. *)
-    let prim, args, loc = simplify_primitive prim args loc in
-    let name = Printlambda.name_of_primitive prim in
-    let result_var = Ident.create_local name in
-    let exn_continuation : I.exn_continuation option =
-      if L.primitive_can_raise prim then
-        Some {
-          exn_handler = k_exn;
-          extra_args = [];
-        }
-      else None
-    in
-    cps_non_tail_list args (fun args ->
-      I.Let (result_var, Not_user_visible, Pgenval,
-        Prim { prim; args; loc; exn_continuation; },
-        Apply_cont (k, None, [Ilambda.Var result_var]))) k_exn
+    begin match transform_primitive prim args loc with
+    | None ->
+      (* CR mshinwell: Arrange for "args" to be named. *)
+      let prim, args, loc = simplify_primitive prim args loc in
+      let name = Printlambda.name_of_primitive prim in
+      let result_var = Ident.create_local name in
+      let exn_continuation : I.exn_continuation option =
+        if L.primitive_can_raise prim then
+          Some {
+            exn_handler = k_exn;
+            extra_args = [];
+          }
+        else None
+      in
+      cps_non_tail_list args (fun args ->
+          I.Let (result_var, Not_user_visible, Pgenval,
+            Prim { prim; args; loc; exn_continuation; },
+            Apply_cont (k, None, [Ilambda.Var result_var]))) k_exn
+    | Some lam -> cps_tail lam k k_exn
+    end
   | Lswitch (scrutinee,
       { sw_numconsts; sw_consts; sw_numblocks = _; sw_blocks; sw_failaction;
         sw_tags_to_sizes = _; }, _loc) ->
