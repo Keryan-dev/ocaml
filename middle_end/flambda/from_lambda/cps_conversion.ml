@@ -30,7 +30,9 @@ type proto_switch = {
   failaction : L.lambda option;
 }
 
-type primitive_transform = No_transformation | Transformed of L.lambda
+type primitive_transform =
+  | Primitive of L.primitive * L.lambda list * L.scoped_location
+  | Transformed of L.lambda
 
 let check_let_rec_bindings bindings =
   List.map (fun (binding : Lambda.lambda) ->
@@ -114,68 +116,6 @@ let compile_staticfail ~(continuation : Continuation.t) ~args =
   in
   mk_poptraps (I.Apply_cont (continuation, None, args))
 
-let simplify_primitive (prim : L.primitive) args loc =
-  match prim, args with
-  | Psetfield (_, _, _), [L.Lprim (Pgetglobal _, [], _); _] ->
-    Misc.fatal_error "[Psetfield (Pgetglobal ...)] is \
-      forbidden upon entry to the middle end"
-  | Pfield ({ index; _ }, _), _ when index < 0 ->
-    Misc.fatal_error "Pfield with negative field index"
-  | Pfloatfield (i, _), _ when i < 0 ->
-    Misc.fatal_error "Pfloatfield with negative field index"
-  | Psetfield ({ index; _ }, _, _), _ when index < 0 ->
-    Misc.fatal_error "Psetfield with negative field index"
-  | Pmakeblock (tag, _, _), _
-      when tag < 0 || tag >= Obj.no_scan_tag ->
-    Misc.fatal_errorf "Pmakeblock with wrong or non-scannable block tag %d" tag
-  | Pmakefloatblock _mut, args when List.length args < 1 ->
-    Misc.fatal_errorf "Pmakefloatblock must have at least one argument"
-  | Pfloatcomp CFnlt, args ->
-    L.Pnot, [L.Lprim (Pfloatcomp CFlt, args, loc)], loc
-  | Pfloatcomp CFngt, args ->
-    L.Pnot, [L.Lprim (Pfloatcomp CFgt, args, loc)], loc
-  | Pfloatcomp CFnle, args ->
-    L.Pnot, [L.Lprim (Pfloatcomp CFle, args, loc)], loc
-  | Pfloatcomp CFnge, args ->
-    L.Pnot, [L.Lprim (Pfloatcomp CFge, args, loc)], loc
-  | Pbigarrayref (_unsafe, num_dimensions, kind, layout), args ->
-    begin match C.convert_bigarray_kind kind,
-                C.convert_bigarray_layout layout with
-    | Some _, Some _ ->
-      prim, args, loc
-    | None, None | None, Some _ | Some _, None ->
-      if 1 <= num_dimensions && num_dimensions <= 3 then begin
-        let arity = 1 + num_dimensions in
-        let name = "caml_ba_get_" ^ string_of_int num_dimensions in
-        let desc = Primitive.simple ~name ~arity ~alloc:true in
-        L.Pccall desc, args, loc
-      end else begin
-        Misc.fatal_errorf
-          "Cps_conversion.simplify_primitive: Pbigarrayref with unknown layout \
-           and elements should only have dimensions between 1 and 3 \
-           (see translprim)."
-      end
-    end
-  | Pbigarrayset (_unsafe, num_dimensions, kind, layout), args ->
-    begin match C.convert_bigarray_kind kind,
-                C.convert_bigarray_layout layout with
-    | Some _, Some _ ->
-      prim, args, loc
-    | None, None | None, Some _ | Some _, None ->
-      if 1 <= num_dimensions && num_dimensions <= 3 then begin
-        let arity = 2 + num_dimensions in
-        let name = "caml_ba_set_" ^ string_of_int num_dimensions in
-        let desc = Primitive.simple ~name ~arity ~alloc:true in
-        L.Pccall desc, args, loc
-      end else begin
-        Misc.fatal_errorf
-          "Cps_conversion.simplify_primimive: Pbigarrayset with unknown layout \
-           and elements should only have dimensions between 1 and 3 \
-           (see translprim)."
-      end
-    end
-  | _, _ -> prim, args, loc
-
 let switch_for_if_then_else ~cond ~ifso ~ifnot k =
   (* CR mshinwell: We need to make sure that [cond] is {0, 1}-valued.
      The frontend should have been fixed on this branch for this. *)
@@ -246,7 +186,86 @@ let transform_primitive (prim : L.primitive) args loc =
       }
     in
     Transformed (L.Lapply apply)
-  | _, _ -> No_transformation
+  | Psetfield (_, _, _), [L.Lprim (Pgetglobal _, [], _); _] ->
+    Misc.fatal_error "[Psetfield (Pgetglobal ...)] is \
+      forbidden upon entry to the middle end"
+  | Pfield ({ index; _ }, _), _ when index < 0 ->
+    Misc.fatal_error "Pfield with negative field index"
+  | Pfloatfield (i, _), _ when i < 0 ->
+    Misc.fatal_error "Pfloatfield with negative field index"
+  | Psetfield ({ index; _ }, _, _), _ when index < 0 ->
+    Misc.fatal_error "Psetfield with negative field index"
+  | Pmakeblock (tag, _, _), _
+      when tag < 0 || tag >= Obj.no_scan_tag ->
+    Misc.fatal_errorf "Pmakeblock with wrong or non-scannable block tag %d" tag
+  | Pmakefloatblock _mut, args when List.length args < 1 ->
+    Misc.fatal_errorf "Pmakefloatblock must have at least one argument"
+  | Pfloatcomp CFnlt, args ->
+    Primitive (L.Pnot, [L.Lprim (Pfloatcomp CFlt, args, loc)], loc)
+  | Pfloatcomp CFngt, args ->
+    Primitive (L.Pnot, [L.Lprim (Pfloatcomp CFgt, args, loc)], loc)
+  | Pfloatcomp CFnle, args ->
+    Primitive (L.Pnot, [L.Lprim (Pfloatcomp CFle, args, loc)], loc)
+  | Pfloatcomp CFnge, args ->
+    Primitive (L.Pnot, [L.Lprim (Pfloatcomp CFge, args, loc)], loc)
+  | Pbigarrayref (_unsafe, num_dimensions, kind, layout), args ->
+    begin match C.convert_bigarray_kind kind,
+                C.convert_bigarray_layout layout with
+    | Some _, Some _ ->
+      Primitive (prim, args, loc)
+    | None, None | None, Some _ | Some _, None ->
+      if 1 <= num_dimensions && num_dimensions <= 3 then begin
+        let arity = 1 + num_dimensions in
+        let name = "caml_ba_get_" ^ string_of_int num_dimensions in
+        let desc = Primitive.simple ~name ~arity ~alloc:true in
+        Primitive (L.Pccall desc, args, loc)
+      end else begin
+        Misc.fatal_errorf
+          "Cps_conversion.transform_primitive: \
+           Pbigarrayref with unknown layout and elements should only have \
+           dimensions between 1 and 3 (see translprim)."
+      end
+    end
+  | Pbigarrayset (_unsafe, num_dimensions, kind, layout), args ->
+    begin match C.convert_bigarray_kind kind,
+                C.convert_bigarray_layout layout with
+    | Some _, Some _ ->
+      Primitive (prim, args, loc)
+    | None, None | None, Some _ | Some _, None ->
+      if 1 <= num_dimensions && num_dimensions <= 3 then begin
+        let arity = 2 + num_dimensions in
+        let name = "caml_ba_set_" ^ string_of_int num_dimensions in
+        let desc = Primitive.simple ~name ~arity ~alloc:true in
+        Primitive (L.Pccall desc, args, loc)
+      end else begin
+        Misc.fatal_errorf
+          "Cps_conversion.transform_primimive: \
+           Pbigarrayset with unknown layout and elements should only have \
+           dimensions between 1 and 3 (see translprim)."
+      end
+    end
+  | (Pfloatcomp _ | Psetfield _ | Prevapply | Pdirapply | Pignore | Pidentity
+  | Pbytes_to_string | Pbytes_of_string | Pisint | Pnot | Pnegint | Paddint
+  | Psubint | Pmulint | Pandint | Porint | Pxorint | Plslint | Plsrint | Pasrint
+  | Pcompare_ints | Pcompare_floats | Pintoffloat | Pfloatofint | Pnegfloat
+  | Pabsfloat | Paddfloat | Psubfloat | Pmulfloat | Pdivfloat | Pstringlength
+  | Pstringrefu | Pstringrefs | Pbyteslength | Pbytesrefu | Pbytessetu
+  | Pbytesrefs | Pbytessets | Pflambda_isint | Pgettag | Pisout | Pbswap16
+  | Pint_as_pointer | Popaque | Pgetglobal _ | Psetglobal _ | Pmakeblock _
+  | Pmakefloatblock _ | Pfield _ | Pfield_computed _ | Psetfield_computed _
+  | Pfloatfield _ | Psetfloatfield _ | Pduprecord _ | Pccall _ | Praise _
+  | Pdivint _ | Pmodint _ | Pintcomp _ | Pcompare_bints _ | Poffsetint _
+  | Poffsetref _ | Pmakearray _ | Pduparray _ | Parraylength _ | Parrayrefu _
+  | Parraysetu _ | Parrayrefs _ | Parraysets _ | Pbintofint _ | Pintofbint _
+  | Pcvtbint _ | Pnegbint _ | Paddbint _ | Psubbint _ | Pmulbint _ | Pdivbint _
+  | Pmodbint _ | Pandbint _ | Porbint _ | Pxorbint _ | Plslbint _ | Plsrbint _
+  | Pasrbint _ | Pbintcomp _ | Pbigarraydim _ | Pstring_load_16 _
+  | Pstring_load_32 _ | Pstring_load_64 _ | Pbytes_load_16 _ | Pbytes_load_32 _
+  | Pbytes_load_64 _ | Pbytes_set_16 _ | Pbytes_set_32 _ | Pbytes_set_64 _
+  | Pbigstring_load_16 _ | Pbigstring_load_32 _ | Pbigstring_load_64 _
+  | Pbigstring_set_16 _ | Pbigstring_set_32 _ | Pbigstring_set_64 _ | Pctconst _
+  | Pbbswap _), _ ->
+     Primitive (prim, args, loc)
 
 let rec cps_non_tail (lam : L.lambda) (k : Ident.t -> Ilambda.t)
           (k_exn : Continuation.t) : Ilambda.t =
@@ -327,9 +346,8 @@ let rec cps_non_tail (lam : L.lambda) (k : Ident.t -> Ilambda.t)
     I.Let (id, User_visible, value_kind, Simple (Const const), body)
   | Llet (let_kind, value_kind, id, Lprim (prim, args, loc), body) ->
     begin match transform_primitive prim args loc with
-    | No_transformation ->
+    | Primitive (prim, args, loc) ->
       (* This case avoids extraneous continuations. *)
-      let prim, args, loc = simplify_primitive prim args loc in
       let exn_continuation : I.exn_continuation option =
         if L.primitive_can_raise prim then
           Some {
@@ -366,8 +384,7 @@ let rec cps_non_tail (lam : L.lambda) (k : Ident.t -> Ilambda.t)
     Let_rec (List.combine idents bindings, body)
   | Lprim (prim, args, loc) ->
     begin match transform_primitive prim args loc with
-    | No_transformation ->
-      let prim, args, loc = simplify_primitive prim args loc in
+    | Primitive (prim, args, loc) ->
       let name = Printlambda.name_of_primitive prim in
       let result_var = Ident.create_local name in
       let exn_continuation : I.exn_continuation option =
@@ -643,9 +660,8 @@ and cps_tail (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
     I.Let (id, User_visible, value_kind, Simple (Const const), body)
   | Llet (let_kind, value_kind, id, Lprim (prim, args, loc), body) ->
     begin match transform_primitive prim args loc with
-    | No_transformation ->
+    | Primitive (prim, args, loc) ->
       (* This case avoids extraneous continuations. *)
-      let prim, args, loc = simplify_primitive prim args loc in
       let exn_continuation : I.exn_continuation option =
         if L.primitive_can_raise prim then
           Some {
@@ -692,9 +708,8 @@ and cps_tail (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
     Let_rec (List.combine idents bindings, body)
   | Lprim (prim, args, loc) ->
     begin match transform_primitive prim args loc with
-    | No_transformation ->
+    | Primitive (prim, args, loc) ->
       (* CR mshinwell: Arrange for "args" to be named. *)
-      let prim, args, loc = simplify_primitive prim args loc in
       let name = Printlambda.name_of_primitive prim in
       let result_var = Ident.create_local name in
       let exn_continuation : I.exn_continuation option =
