@@ -30,7 +30,7 @@ type proto_switch = {
   failaction : L.lambda option;
 }
 
-type primitive_transform =
+type primitive_transform_result =
   | Primitive of L.primitive * L.lambda list * L.scoped_location
   | Transformed of L.lambda
 
