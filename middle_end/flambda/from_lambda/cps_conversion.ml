@@ -157,6 +157,7 @@ let transform_primitive (prim : L.primitive) args loc =
   | (Psequand | Psequor), _ ->
     Misc.fatal_error "Psequand / Psequor must have exactly two arguments"
   (* Removed. Should be safe, but will no longer catch misuses.
+     CR keryan: do we still need this primitive ?
   | Pflambda_isint, _ ->
     Misc.fatal_error "[Pflambda_isint] should not exist at this stage" *)
   | Pisint, [arg] ->
@@ -244,28 +245,7 @@ let transform_primitive (prim : L.primitive) args loc =
            dimensions between 1 and 3 (see translprim)."
       end
     end
-  | (Pfloatcomp _ | Psetfield _ | Prevapply | Pdirapply | Pignore | Pidentity
-  | Pbytes_to_string | Pbytes_of_string | Pisint | Pnot | Pnegint | Paddint
-  | Psubint | Pmulint | Pandint | Porint | Pxorint | Plslint | Plsrint | Pasrint
-  | Pcompare_ints | Pcompare_floats | Pintoffloat | Pfloatofint | Pnegfloat
-  | Pabsfloat | Paddfloat | Psubfloat | Pmulfloat | Pdivfloat | Pstringlength
-  | Pstringrefu | Pstringrefs | Pbyteslength | Pbytesrefu | Pbytessetu
-  | Pbytesrefs | Pbytessets | Pflambda_isint | Pgettag | Pisout | Pbswap16
-  | Pint_as_pointer | Popaque | Pgetglobal _ | Psetglobal _ | Pmakeblock _
-  | Pmakefloatblock _ | Pfield _ | Pfield_computed _ | Psetfield_computed _
-  | Pfloatfield _ | Psetfloatfield _ | Pduprecord _ | Pccall _ | Praise _
-  | Pdivint _ | Pmodint _ | Pintcomp _ | Pcompare_bints _ | Poffsetint _
-  | Poffsetref _ | Pmakearray _ | Pduparray _ | Parraylength _ | Parrayrefu _
-  | Parraysetu _ | Parrayrefs _ | Parraysets _ | Pbintofint _ | Pintofbint _
-  | Pcvtbint _ | Pnegbint _ | Paddbint _ | Psubbint _ | Pmulbint _ | Pdivbint _
-  | Pmodbint _ | Pandbint _ | Porbint _ | Pxorbint _ | Plslbint _ | Plsrbint _
-  | Pasrbint _ | Pbintcomp _ | Pbigarraydim _ | Pstring_load_16 _
-  | Pstring_load_32 _ | Pstring_load_64 _ | Pbytes_load_16 _ | Pbytes_load_32 _
-  | Pbytes_load_64 _ | Pbytes_set_16 _ | Pbytes_set_32 _ | Pbytes_set_64 _
-  | Pbigstring_load_16 _ | Pbigstring_load_32 _ | Pbigstring_load_64 _
-  | Pbigstring_set_16 _ | Pbigstring_set_32 _ | Pbigstring_set_64 _ | Pctconst _
-  | Pbbswap _), _ ->
-     Primitive (prim, args, loc)
+  | _, _ -> Primitive (prim, args, loc)
 
 let rec cps_non_tail (lam : L.lambda) (k : Ident.t -> Ilambda.t)
           (k_exn : Continuation.t) : Ilambda.t =
