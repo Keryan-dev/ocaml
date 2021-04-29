@@ -252,7 +252,7 @@ let transform_primitive (prim : L.primitive) args loc =
     end
   | _, _ -> Primitive (prim, args, loc)
 
-let exception_for_while_loop cond body =
+let rec_catch_for_while_loop cond body =
   let cont = L.next_raise_count () in
   mark_as_recursive_static_catch cont;
   let cond_result = Ident.create_local "while_cond_result" in
@@ -268,7 +268,7 @@ let exception_for_while_loop cond body =
           Lconst (Const_base (Const_int 0)))))
   in lam
 
-let exception_for_for_loop
+let rec_catch_for_for_loop
       ident start stop (dir : Asttypes.direction_flag) body =
   let cont = L.next_raise_count () in
   mark_as_recursive_static_catch cont;
@@ -608,10 +608,10 @@ let rec cps_non_tail (lam : L.lambda) (k : Ident.t -> Ilambda.t)
     let ident = Ident.create_local "sequence" in
     cps_non_tail (L.Llet (Strict, Pgenval, ident, lam1, lam2)) k k_exn
   | Lwhile (cond, body) ->
-    let loop = exception_for_while_loop cond body in
+    let loop = rec_catch_for_while_loop cond body in
     cps_non_tail loop k k_exn
   | Lfor (ident, start, stop, dir, body) ->
-    let loop = exception_for_for_loop ident start stop dir body in
+    let loop = rec_catch_for_for_loop ident start stop dir body in
     cps_non_tail loop k k_exn
   | Lassign (being_assigned, new_value) ->
     cps_non_tail_simple new_value (fun new_value ->
@@ -902,10 +902,10 @@ and cps_tail (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
     let ident = Ident.create_local "sequence" in
     cps_tail (L.Llet (Strict, Pgenval, ident, lam1, lam2)) k k_exn
   | Lwhile (cond, body) ->
-    let loop = exception_for_while_loop cond body in
+    let loop = rec_catch_for_while_loop cond body in
     cps_tail loop k k_exn
   | Lfor (ident, start, stop, dir, body) ->
-    let loop = exception_for_for_loop ident start stop dir body in
+    let loop = rec_catch_for_for_loop ident start stop dir body in
     cps_tail loop k k_exn
   | Lifused _ | Levent _ ->
     Misc.fatal_errorf "Term should have been eliminated by [Prepare_lambda]: %a"
