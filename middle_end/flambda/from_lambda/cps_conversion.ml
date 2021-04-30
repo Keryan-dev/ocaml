@@ -1032,12 +1032,11 @@ and cps_switch (switch : proto_switch) ~scrutinee (k : Continuation.t)
         wrappers)
     k_exn
 
-let lambda_to_ilambda lam ~recursive_static_catches:recursive_static_catches'
-      : Ilambda.program =
+let lambda_to_ilambda lam : Ilambda.program =
   static_exn_env := Numbers.Int.Map.empty;
   try_stack := [];
   try_stack_at_handler := Continuation.Map.empty;
-  recursive_static_catches := recursive_static_catches';
+  recursive_static_catches := Numbers.Int.Set.empty;
   mutable_variables := Ident.Set.empty;
   let the_end = Continuation.create ~sort:Define_root_symbol () in
   let the_end_exn = Continuation.create ~sort:Exn () in

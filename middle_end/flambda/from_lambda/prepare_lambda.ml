@@ -62,9 +62,6 @@ end = struct
     }
 end
 
-(* CR-soon mshinwell: Remove mutable state *)
-let recursive_static_catches = ref Numbers.Int.Set.empty
-
 (*
 let simplify_primitive (prim : L.primitive) args loc =
   match prim, args with
@@ -389,11 +386,9 @@ and prepare_option env lam_opt k =
   | Some lam -> prepare env lam (fun lam -> k (Some lam))
 
 let run lam =
-  recursive_static_catches := Numbers.Int.Set.empty;
   let current_unit_id =
     Compilation_unit.get_persistent_ident
       (Compilation_unit.get_current_exn ())
   in
   let env = Env.create ~current_unit_id in
-  let lam = prepare env lam (fun lam -> lam) in
-  lam, !recursive_static_catches
+  prepare env lam (fun lam -> lam)
