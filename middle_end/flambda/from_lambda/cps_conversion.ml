@@ -133,7 +133,6 @@ let switch_for_if_then_else ~cond ~ifso ~ifnot =
       sw_numblocks = 0;
       sw_blocks = [];
       sw_failaction = None;
-      sw_tags_to_sizes = Tag.Scannable.Map.empty;
     }
   in
   L.Lswitch (cond, switch, Loc_unknown)
@@ -450,8 +449,8 @@ let rec cps_non_tail (lam : L.lambda) (k : Ident.t -> Ilambda.t)
     | Transformed lam -> cps_non_tail lam k k_exn
     end
   | Lswitch (scrutinee,
-      { sw_numconsts; sw_consts; sw_numblocks = _; sw_blocks; sw_failaction;
-        sw_tags_to_sizes = _; }, _loc) ->
+      { sw_numconsts; sw_consts; sw_numblocks = _; sw_blocks; sw_failaction; },
+      _loc) ->
     begin match sw_blocks with
     | [] -> ()
     | _ -> Misc.fatal_error "Lswitch `block' cases are forbidden"
@@ -784,8 +783,8 @@ and cps_tail (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
     | Transformed lam -> cps_tail lam k k_exn
     end
   | Lswitch (scrutinee,
-      { sw_numconsts; sw_consts; sw_numblocks = _; sw_blocks; sw_failaction;
-        sw_tags_to_sizes = _; }, _loc) ->
+      { sw_numconsts; sw_consts; sw_numblocks = _; sw_blocks; sw_failaction;},
+      _loc) ->
     begin match sw_blocks with
     | [] -> ()
     | _ -> Misc.fatal_error "Lswitch `block' cases are forbidden"

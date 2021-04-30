@@ -231,33 +231,27 @@ let rec prepare env (lam : L.lambda) (k : L.lambda -> L.lambda) =
                 sw_numblocks = 0;
                 sw_blocks = [];
                 sw_failaction;
-                sw_tags_to_sizes = Tag.Scannable.Map.empty;
               }
             in
             (* CR mshinwell: Merge this file into Cps_conversion then delete
                [sw_tags_to_sizes]. *)
-            let tags_to_sizes =
-              List.fold_left (fun tags_to_sizes
-                        ({ sw_tag; sw_size; } : L.lambda_switch_block_key) ->
+            begin
+              List.iter (fun ({ sw_tag; _ } : L.lambda_switch_block_key) ->
                   match Tag.Scannable.create sw_tag with
                   | Some tag ->
                     let tag' = Tag.Scannable.to_tag tag in
-                    if Tag.is_structured_block_but_not_a_variant tag' then begin
+                    if Tag.is_structured_block_but_not_a_variant tag' then
                       Misc.fatal_errorf "Bad tag %a in [Lswitch] (tag is that \
                           of a scannable block, but not one treated like a \
                           variant; [Lswitch] can only be used for variant \
                           matching)"
                         Tag.print tag'
-                    end;
-                    let size = Targetint.OCaml.of_int sw_size in
-                    Tag.Scannable.Map.add tag size tags_to_sizes
                   | None ->
                     Misc.fatal_errorf "Bad tag %d in [Lswitch] (not the tag \
                         of a GC-scannable block)"
                       sw_tag)
-                Tag.Scannable.Map.empty
                 block_nums
-            in
+            end;
             let block_nums =
               List.map (fun ({ sw_tag; _} : L.lambda_switch_block_key) ->
                   sw_tag)
@@ -278,7 +272,6 @@ let rec prepare env (lam : L.lambda) (k : L.lambda -> L.lambda) =
                 sw_blocks = [];
                 sw_failaction;
                 (* XXX What about the size for the failaction? ... *)
-                sw_tags_to_sizes = tags_to_sizes;
               }
             in
             let consts_switch : L.lambda =
@@ -295,7 +288,6 @@ let rec prepare env (lam : L.lambda) (k : L.lambda -> L.lambda) =
                 sw_numblocks = 0;
                 sw_blocks = [];
                 sw_failaction = None;
-                sw_tags_to_sizes = Tag.Scannable.Map.empty;
               }
             in
             let switch =
