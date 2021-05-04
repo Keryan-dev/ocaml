@@ -302,7 +302,7 @@ let rec_catch_for_for_loop
       Llet (Strict, Pgenval, stop_ident, stop,
         Lifthenelse (first_test,
           Lstaticcatch (
-            Lstaticraise (cont, [start]),
+            Lstaticraise (cont, [L.Lvar start_ident]),
             (cont, [ident, Pgenval]),
             Lsequence (
               body,
