@@ -225,7 +225,12 @@ let rec prepare env (lam : L.lambda) (k : L.lambda -> L.lambda) =
             in
             k (Lswitch (scrutinee, switch, loc))))))
   | Lstringswitch (scrutinee, cases, default, loc) ->
-    prepare env (Matching.expand_stringswitch loc scrutinee cases default) k
+    prepare env scrutinee (fun scrutinee ->
+      let patterns, actions = List.split cases in
+      prepare_list env actions (fun actions ->
+        prepare_option env default (fun default ->
+          let cases = List.combine patterns actions in
+          k (L.Lstringswitch (scrutinee, cases, default, loc)))))
   | Lstaticraise (cont, args) ->
     prepare_list env args (fun args ->
       k (L.Lstaticraise (cont, args)))

@@ -455,8 +455,9 @@ let rec cps_non_tail (lam : L.lambda) (k : Ident.t -> Ilambda.t)
       body;
       handler = after;
     }
-  | Lstringswitch _ ->
-    Misc.fatal_error "Lstringswitch must be expanded prior to CPS conversion"
+  | Lstringswitch (scrutinee, cases, default, loc) ->
+    cps_non_tail (Matching.expand_stringswitch loc scrutinee cases default)
+      k k_exn
   | Lstaticraise (static_exn, args) ->
     let continuation =
       match Numbers.Int.Map.find static_exn !static_exn_env with
@@ -766,8 +767,8 @@ and cps_tail (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
     end
   | Lswitch (scrutinee,switch, _loc) ->
     cps_switch switch ~scrutinee k k_exn
-  | Lstringswitch _ ->
-    Misc.fatal_error "Lstringswitch must be expanded prior to CPS conversion"
+  | Lstringswitch (scrutinee, cases, default, loc) ->
+    cps_tail (Matching.expand_stringswitch loc scrutinee cases default) k k_exn
   | Lstaticraise (static_exn, args) ->
     let continuation =
       match Numbers.Int.Map.find static_exn !static_exn_env with
