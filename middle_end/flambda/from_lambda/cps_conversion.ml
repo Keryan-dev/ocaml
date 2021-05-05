@@ -956,7 +956,7 @@ and cps_switch (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
         [Lswitch] can only be used for variant matching"
         switch.sw_numblocks
     end;
-  let convert_arms_rev =
+  let convert_arms_rev cases wrappers =
     List.fold_left (fun (consts_rev, wrappers) (arm, (action : L.lambda)) ->
         match action with
         | Lvar var when not (Ident.Set.mem var !mutable_variables) ->
@@ -995,10 +995,13 @@ and cps_switch (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
             let consts_rev = (arm, cont, None, []) :: consts_rev in
             let wrappers = (cont, action) :: wrappers in
             consts_rev, wrappers)
+      ([], wrappers)
+      cases
   in
-  let consts_rev, wrappers = convert_arms_rev ([],[]) switch.sw_consts in
-  let blocks_rev, wrappers = convert_arms_rev ([], wrappers)
+  let consts_rev, wrappers = convert_arms_rev switch.sw_consts [] in
+  let blocks_rev, wrappers = convert_arms_rev
     (List.combine block_nums sw_blocks)
+    wrappers
   in
   let consts = List.rev consts_rev in
   let blocks = List.rev blocks_rev in
@@ -1023,7 +1026,7 @@ and cps_switch (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
       failaction;
     }
   in
-  let build_switch scrutinee =
+  let build_switch scrutinee wrappers =
     let const_switch = I.Switch (scrutinee, const_switch) in
     let block_switch = cps_non_tail
       (L.Lprim (Pgettag, [L.Lvar scrutinee], Loc_unknown))
@@ -1050,7 +1053,7 @@ and cps_switch (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
       ((const_cont, const_switch)::(block_cont, block_switch)::wrappers)
   in
   cps_non_tail scrutinee (fun scrutinee ->
-      let switch, wrappers = build_switch scrutinee in
+      let switch, wrappers = build_switch scrutinee wrappers in
       List.fold_left (fun body (cont, action) ->
           I.Let_cont {
             name = cont;
