@@ -1028,10 +1028,15 @@ and cps_switch (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
   in
   let build_switch scrutinee wrappers =
     let const_switch = I.Switch (scrutinee, const_switch) in
-    let block_switch = cps_non_tail
-      (L.Lprim (Pgettag, [L.Lvar scrutinee], Loc_unknown))
-      (fun scrutinee -> I.Switch (scrutinee, block_switch))
-      k_exn
+    let scrutinee_tag = Ident.create_local "scrutinee_tag" in
+    let block_switch = I.Let ( scrutinee_tag,
+      Not_user_visible,
+      Pgenval,
+      Prim { prim = Pgettag;
+        args = [Var scrutinee];
+        loc = Loc_unknown;
+        exn_continuation = None; },
+      I.Switch(scrutinee_tag, block_switch))
     in
     if switch.sw_numblocks = 0 then const_switch, wrappers
     else if switch.sw_numconsts = 0 then block_switch, wrappers
@@ -1044,10 +1049,15 @@ and cps_switch (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
           failaction = None;
         }
       in
-      let isint_switch = cps_non_tail
-        (L.Lprim (Pflambda_isint, [L.Lvar scrutinee], Loc_unknown))
-        (fun scrutinee -> I.Switch (scrutinee, isint_switch))
-        k_exn
+      let is_scrutinee_int = Ident.create_local "is_scrutinee_int" in
+      let isint_switch = I.Let ( is_scrutinee_int,
+      Not_user_visible,
+      Pgenval,
+      Prim { prim = Pflambda_isint;
+        args = [Var scrutinee];
+        loc = Loc_unknown;
+        exn_continuation = None; },
+      I.Switch(is_scrutinee_int, isint_switch))
       in
       isint_switch,
       ((const_cont, const_switch)::(block_cont, block_switch)::wrappers)
