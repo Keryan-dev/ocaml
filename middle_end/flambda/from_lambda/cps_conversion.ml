@@ -67,16 +67,6 @@ type primitive_transform_result =
   | Primitive of L.primitive * L.lambda list * L.scoped_location
   | Transformed of L.lambda
 
-let check_let_rec_bindings bindings =
-  List.map (fun (binding : Lambda.lambda) ->
-      match binding with
-      | Lfunction func -> func
-      | _ ->
-        Misc.fatal_errorf "Only [Lfunction] expressions are permitted in \
-            [Lletrec] bindings upon entry to CPS conversion: %a"
-          Printlambda.lambda binding)
-    bindings
-
 let name_for_function (func : Lambda.lfunction) =
   (* Name anonymous functions by their source location, if known. *)
   match func.loc with
@@ -391,7 +381,7 @@ let rec cps_non_tail env (lam : L.lambda) (k : Ident.t -> Ilambda.t)
       k_exn
   | Lfunction func ->
     let id = Ident.create_local (name_for_function func) in
-    let func = cps_function env func in
+    let func = cps_function env ~stub:false func in
     let body = k id in
     Let_rec ([id, func], body)
   | Llet (Variable, value_kind, id, defining_expr, body) ->
@@ -416,30 +406,12 @@ let rec cps_non_tail env (lam : L.lambda) (k : Ident.t -> Ilambda.t)
       handler = Let_mutable let_mutable;
     }
   | Llet ((Strict | Alias | StrictOpt), Pgenval, fun_id,
-      Lfunction { kind; params; body = fbody; attr; loc; return; }, body) ->
-    let bindings =
-      Simplif.split_default_wrapper ~id:fun_id ~kind ~params
-        ~body:fbody ~return ~attr ~loc
-    in
-    begin match bindings with
-    | [_] | [_; _] -> ()
-    | _ ->
-      Misc.fatal_errorf "Unexpected return value from \
-          [split_default_wrapper] when translating:@ %a"
-        Printlambda.lambda lam
-    end;
+      Lfunction func, body) ->
+    (* This case is here to get function names right. *)
+    let bindings = cps_function_bindings env [fun_id, L.Lfunction func] in
     let body = cps_non_tail env body k k_exn in
-    List.fold_left (fun body (fun_id, def) ->
-        match def with
-        | L.Lfunction func ->
-          (* This case is here to get function names right. *)
-          let func = cps_function env func in
-          I.Let_rec ([fun_id, func], body)
-        | _ -> (* CR keryan: unreachable ? *)
-          assert false)
-          (* cps_non_tail def (fun def ->
-           *   I.Let (fun_id, User_visible, Pgenval, def, body))
-           *   k_exn) *)
+    List.fold_left (fun body (fun_id, func) ->
+        I.Let_rec ([fun_id, func], body))
       body bindings
   | Llet (_, value_kind, id, Lconst const, body) ->
     (* This case avoids extraneous continuations. *)
@@ -479,21 +451,9 @@ let rec cps_non_tail env (lam : L.lambda) (k : Ident.t -> Ilambda.t)
       handler = body;
     }
   | Lletrec (bindings, body) ->
-    let idents, bindings =
-      List.concat_map (fun (fun_id, binding) ->
-          match binding with
-          | L.Lfunction { kind; params; body = fbody; attr; loc; return; _ } ->
-            Simplif.split_default_wrapper ~id:fun_id ~kind ~params
-              ~body:fbody ~return ~attr ~loc
-          | _ -> [fun_id, binding])
-        bindings
-      |> List.split
-    in
-    let bindings = List.map (cps_function env)
-      (check_let_rec_bindings bindings)
-    in
+    let bindings = cps_function_bindings env bindings in
     let body = cps_non_tail env body k k_exn in
-    Let_rec (List.combine idents bindings, body)
+    Let_rec (bindings, body)
   | Lprim (prim, args, loc) ->
     begin match transform_primitive env prim args loc with
     | Primitive (prim, args, loc) ->
@@ -745,7 +705,7 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
         I.Apply apply) k_exn) k_exn
   | Lfunction func ->
     let id = Ident.create_local (name_for_function func) in
-    let func = cps_function env func in
+    let func = cps_function env ~stub:false func in
     Let_rec ([id, func], Apply_cont (k, None, [Ilambda.Var id]))
   | Llet (Variable, value_kind, id, defining_expr, body) ->
     let env = Env.add_mutable env id in
@@ -771,30 +731,12 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
       handler = Let_mutable let_mutable;
     }
   | Llet ((Strict | Alias | StrictOpt), Pgenval, fun_id,
-      Lfunction { kind; params; body = fbody; attr; loc; return; }, body) ->
-    let bindings =
-      Simplif.split_default_wrapper ~id:fun_id ~kind ~params
-        ~body:fbody ~return ~attr ~loc
-    in
-    begin match bindings with
-    | [_] | [_; _] -> ()
-    | _ ->
-      Misc.fatal_errorf "Unexpected return value from \
-          [split_default_wrapper] when translating:@ %a"
-        Printlambda.lambda lam
-    end;
+      Lfunction func, body) ->
+    (* This case is here to get function names right. *)
+    let bindings = cps_function_bindings env [fun_id, L.Lfunction func] in
     let body = cps_tail env body k k_exn in
-    List.fold_left (fun body (fun_id, def) ->
-        match def with
-        | L.Lfunction func ->
-          (* This case is here to get function names right. *)
-          let func = cps_function env func in
-          I.Let_rec ([fun_id, func], body)
-        | _ -> (* CR keryan: unreachable ? *)
-          assert false)
-          (* cps_non_tail def (fun def ->
-           *   I.Let (fun_id, User_visible, Pgenval, def, body))
-           *   k_exn) *)
+    List.fold_left (fun body (fun_id, func) ->
+        I.Let_rec ([fun_id, func], body))
       body bindings
   | Llet (_, value_kind, id, Lconst const, body) ->
     (* This case avoids extraneous continuations. *)
@@ -848,21 +790,9 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
       handler = body;
     }
   | Lletrec (bindings, body) ->
-    let idents, bindings =
-      List.concat_map (fun (fun_id, binding) ->
-          match binding with
-          | L.Lfunction { kind; params; body = fbody; attr; loc; return; _ } ->
-            Simplif.split_default_wrapper ~id:fun_id ~kind ~params
-              ~body:fbody ~return ~attr ~loc
-          | _ -> [fun_id, binding])
-        bindings
-      |> List.split
-    in
-    let bindings = List.map (cps_function env)
-      (check_let_rec_bindings bindings)
-    in
+    let bindings = cps_function_bindings env bindings in
     let body = cps_tail env body k k_exn in
-    Let_rec (List.combine idents bindings, body)
+    Let_rec (bindings, body)
   | Lprim (prim, args, loc) ->
     begin match transform_primitive env prim args loc with
     | Primitive (prim, args, loc) ->
@@ -1034,7 +964,36 @@ and cps_non_tail_list_core env (lams : L.lambda list)
         (fun simples -> k (simple :: simples)) k_exn)
       k_exn
 
-and cps_function env ({ kind; params; return; body; attr; loc; } : L.lfunction)
+and cps_function_bindings env (bindings : (Ident.t * L.lambda) list) =
+  List.concat_map (fun (fun_id, binding) ->
+      match binding with
+      | L.Lfunction { kind; params; body = fbody; attr; loc; return; _ } ->
+        begin match
+          Simplif.split_default_wrapper ~id:fun_id ~kind ~params
+            ~body:fbody ~return ~attr ~loc
+        with
+        | [fun_id, L.Lfunction def] ->
+          [fun_id, cps_function env ~stub:false def]
+        | [fun_id, L.Lfunction def; inner_id, L.Lfunction inner_def] ->
+          [fun_id, cps_function env ~stub:false def;
+           inner_id, cps_function env ~stub:true inner_def]
+        | [_, _] | [_, _; _, _] ->
+          Misc.fatal_errorf "Expected `Lfunction` terms from \
+              [split_default_wrapper] when translating:@ %a"
+            Printlambda.lambda binding
+        | _ ->
+          Misc.fatal_errorf "Unexpected return value from \
+              [split_default_wrapper] when translating:@ %a"
+            Printlambda.lambda binding
+        end
+      | _ ->
+        Misc.fatal_errorf "Only [Lfunction] expressions are permitted in \
+            function bindings upon entry to CPS conversion: %a"
+          Printlambda.lambda binding)
+    bindings
+
+and cps_function env ~stub
+      ({ kind; params; return; body; attr; loc; } : L.lfunction)
       : Ilambda.function_declaration =
   let body_cont = Continuation.create ~sort:Return () in
   let body_exn_cont = Continuation.create ~sort:Exn () in
@@ -1054,7 +1013,7 @@ and cps_function env ({ kind; params; return; body; attr; loc; } : L.lfunction)
     free_idents_of_body;
     attr = attr;
     loc = loc;
-    stub = false;
+    stub;
   }
 
 and cps_switch env (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
