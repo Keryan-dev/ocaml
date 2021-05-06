@@ -115,41 +115,12 @@ let rec prepare (lam : L.lambda) (k : L.lambda -> L.lambda) =
         attr = attr;
         loc = loc;
       }))
-  | Llet ((Strict | Alias | StrictOpt), Pgenval, fun_id,
-      Lfunction { kind; params; body = fbody; attr; loc; return; }, body) ->
-    begin match
-      Simplif.split_default_wrapper ~id:fun_id ~kind ~params
-        ~body:fbody ~return ~attr ~loc
-    with
-    | [fun_id, def] ->
-      (* CR mshinwell: Here and below, mark the wrappers as stubs *)
-      prepare def (fun def ->
-        prepare body (fun body ->
-          k (L.Llet (Alias, Pgenval, fun_id, def, body))))
-    | [fun_id, def; inner_fun_id, inner_def] ->
-      prepare inner_def (fun inner_def ->
-        prepare def (fun def ->
-          prepare body (fun body ->
-            k (L.Llet (Alias, Pgenval, inner_fun_id, inner_def,
-              L.Llet (Alias, Pgenval, fun_id, def, body))))))
-    | _ ->
-      Misc.fatal_errorf "Unexpected return value from \
-          [split_default_wrapper] when translating:@ %a"
-        Printlambda.lambda lam
-    end
   | Llet (let_kind, value_kind, id, defining_expr, body) ->
     prepare defining_expr (fun defining_expr ->
       prepare body (fun body ->
         k (L.Llet (let_kind, value_kind, id, defining_expr, body))))
   | Lletrec (bindings, body) ->
-    prepare_list_with_flatten_map bindings
-      ~flatten_map:(fun fun_id (binding : L.lambda) ->
-        match binding with
-        | Lfunction { kind; params; body = fbody; attr; loc; return; _ } ->
-          Simplif.split_default_wrapper ~id:fun_id ~kind ~params
-            ~body:fbody ~return ~attr ~loc
-        | _ -> [fun_id, binding])
-      (fun bindings ->
+    prepare_list_with_idents bindings (fun bindings ->
         prepare body (fun body ->
           k (L.Lletrec (bindings, body))))
   | Lprim (prim, args, loc) ->
@@ -231,14 +202,6 @@ and prepare_list_with_idents lams k =
   | (id, lam)::lams ->
     prepare lam (fun lam ->
       prepare_list_with_idents lams (fun lams -> k ((id, lam)::lams)))
-
-and prepare_list_with_flatten_map lams ~flatten_map k =
-  match lams with
-  | [] -> k []
-  | (id, lam)::lams ->
-    prepare_list_with_idents (flatten_map id lam) (fun mapped ->
-      prepare_list_with_flatten_map lams ~flatten_map (fun lams ->
-        k (mapped @ lams)))
 
 and prepare_option lam_opt k =
   match lam_opt with

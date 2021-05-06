@@ -415,11 +415,32 @@ let rec cps_non_tail env (lam : L.lambda) (k : Ident.t -> Ilambda.t)
       body = defining_expr;
       handler = Let_mutable let_mutable;
     }
-  | Llet (Alias, Pgenval, id, Lfunction func, body) ->
-    (* This case is here to get function names right. *)
-    let func = cps_function env func in
+  | Llet ((Strict | Alias | StrictOpt), Pgenval, fun_id,
+      Lfunction { kind; params; body = fbody; attr; loc; return; }, body) ->
+    let bindings =
+      Simplif.split_default_wrapper ~id:fun_id ~kind ~params
+        ~body:fbody ~return ~attr ~loc
+    in
+    begin match bindings with
+    | [_] | [_; _] -> ()
+    | _ ->
+      Misc.fatal_errorf "Unexpected return value from \
+          [split_default_wrapper] when translating:@ %a"
+        Printlambda.lambda lam
+    end;
     let body = cps_non_tail env body k k_exn in
-    Let_rec ([id, func], body)
+    List.fold_left (fun body (fun_id, def) ->
+        match def with
+        | L.Lfunction func ->
+          (* This case is here to get function names right. *)
+          let func = cps_function env func in
+          I.Let_rec ([fun_id, func], body)
+        | _ -> (* CR keryan: unreachable ? *)
+          assert false)
+          (* cps_non_tail def (fun def ->
+           *   I.Let (fun_id, User_visible, Pgenval, def, body))
+           *   k_exn) *)
+      body bindings
   | Llet (_, value_kind, id, Lconst const, body) ->
     (* This case avoids extraneous continuations. *)
     let body = cps_non_tail env body k k_exn in
@@ -458,7 +479,16 @@ let rec cps_non_tail env (lam : L.lambda) (k : Ident.t -> Ilambda.t)
       handler = body;
     }
   | Lletrec (bindings, body) ->
-    let idents, bindings = List.split bindings in
+    let idents, bindings =
+      List.concat_map (fun (fun_id, binding) ->
+          match binding with
+          | L.Lfunction { kind; params; body = fbody; attr; loc; return; _ } ->
+            Simplif.split_default_wrapper ~id:fun_id ~kind ~params
+              ~body:fbody ~return ~attr ~loc
+          | _ -> [fun_id, binding])
+        bindings
+      |> List.split
+    in
     let bindings = List.map (cps_function env)
       (check_let_rec_bindings bindings)
     in
@@ -740,12 +770,32 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
       body = defining_expr;
       handler = Let_mutable let_mutable;
     }
-  | Llet (Alias, Pgenval, id, Lfunction func, body) ->
-    (* CR mshinwell: Why is this case restricted to [Alias]? *)
-    (* This case is here to get function names right. *)
-    let func = cps_function env func in
+  | Llet ((Strict | Alias | StrictOpt), Pgenval, fun_id,
+      Lfunction { kind; params; body = fbody; attr; loc; return; }, body) ->
+    let bindings =
+      Simplif.split_default_wrapper ~id:fun_id ~kind ~params
+        ~body:fbody ~return ~attr ~loc
+    in
+    begin match bindings with
+    | [_] | [_; _] -> ()
+    | _ ->
+      Misc.fatal_errorf "Unexpected return value from \
+          [split_default_wrapper] when translating:@ %a"
+        Printlambda.lambda lam
+    end;
     let body = cps_tail env body k k_exn in
-    Let_rec ([id, func], body)
+    List.fold_left (fun body (fun_id, def) ->
+        match def with
+        | L.Lfunction func ->
+          (* This case is here to get function names right. *)
+          let func = cps_function env func in
+          I.Let_rec ([fun_id, func], body)
+        | _ -> (* CR keryan: unreachable ? *)
+          assert false)
+          (* cps_non_tail def (fun def ->
+           *   I.Let (fun_id, User_visible, Pgenval, def, body))
+           *   k_exn) *)
+      body bindings
   | Llet (_, value_kind, id, Lconst const, body) ->
     (* This case avoids extraneous continuations. *)
     let body = cps_tail env body k k_exn in
@@ -798,7 +848,16 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
       handler = body;
     }
   | Lletrec (bindings, body) ->
-    let idents, bindings = List.split bindings in
+    let idents, bindings =
+      List.concat_map (fun (fun_id, binding) ->
+          match binding with
+          | L.Lfunction { kind; params; body = fbody; attr; loc; return; _ } ->
+            Simplif.split_default_wrapper ~id:fun_id ~kind ~params
+              ~body:fbody ~return ~attr ~loc
+          | _ -> [fun_id, binding])
+        bindings
+      |> List.split
+    in
     let bindings = List.map (cps_function env)
       (check_let_rec_bindings bindings)
     in
