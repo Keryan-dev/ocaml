@@ -18,50 +18,6 @@
 
 module L = Lambda
 
-module Env : sig
-  type t
-
-  val create : current_unit_id:Ident.t -> t
-
-  val current_unit_id : t -> Ident.t
-
-  val add_mutable : t -> Ident.t -> t
-  val is_mutable : t -> Ident.t -> bool
-
-  val add_continuation : t -> int -> t
-end = struct
-  type t = {
-    current_unit_id : Ident.t;
-    mutables : Ident.Set.t;
-    current_exception_depth : int;
-    handler_exception_continuation : int Numbers.Int.Map.t; (* exception depth *)
-  }
-
-  let create ~current_unit_id =
-    { current_unit_id;
-      mutables = Ident.Set.empty;
-      current_exception_depth = 0;
-      handler_exception_continuation = Numbers.Int.Map.empty;
-    }
-
-  let current_unit_id t = t.current_unit_id
-
-  let add_mutable t id =
-    assert (not (Ident.Set.mem id t.mutables));
-    { t with mutables = Ident.Set.add id t.mutables; }
-
-  let is_mutable t id =
-    Ident.Set.mem id t.mutables
-
-
-  let add_continuation t cont =
-    { t with
-      handler_exception_continuation =
-        Numbers.Int.Map.add cont t.current_exception_depth
-          t.handler_exception_continuation;
-    }
-end
-
 (*
 let simplify_primitive (prim : L.primitive) args loc =
   match prim, args with
@@ -134,13 +90,13 @@ let simplify_primitive (prim : L.primitive) args loc =
    *)
 *)
 
-let rec prepare env (lam : L.lambda) (k : L.lambda -> L.lambda) =
+let rec prepare (lam : L.lambda) (k : L.lambda -> L.lambda) =
   match lam with
   | Lvar _ | Lconst _ -> k lam
   | Lapply { ap_func; ap_args; ap_loc; ap_should_be_tailcall; ap_inlined;
       ap_specialised; } ->
-    prepare env ap_func (fun ap_func ->
-      prepare_list env ap_args (fun ap_args ->
+    prepare ap_func (fun ap_func ->
+      prepare_list ap_args (fun ap_args ->
         k (L.Lapply {
           ap_func;
           ap_args;
@@ -150,7 +106,7 @@ let rec prepare env (lam : L.lambda) (k : L.lambda -> L.lambda) =
           ap_specialised = ap_specialised;
         })))
   | Lfunction { kind; params; return; body; attr; loc; } ->
-    prepare env body (fun body ->
+    prepare body (fun body ->
       k (L.Lfunction {
         kind = kind;
         params = params;
@@ -167,13 +123,13 @@ let rec prepare env (lam : L.lambda) (k : L.lambda -> L.lambda) =
     with
     | [fun_id, def] ->
       (* CR mshinwell: Here and below, mark the wrappers as stubs *)
-      prepare env def (fun def ->
-        prepare env body (fun body ->
+      prepare def (fun def ->
+        prepare body (fun body ->
           k (L.Llet (Alias, Pgenval, fun_id, def, body))))
     | [fun_id, def; inner_fun_id, inner_def] ->
-      prepare env inner_def (fun inner_def ->
-        prepare env def (fun def ->
-          prepare env body (fun body ->
+      prepare inner_def (fun inner_def ->
+        prepare def (fun def ->
+          prepare body (fun body ->
             k (L.Llet (Alias, Pgenval, inner_fun_id, inner_def,
               L.Llet (Alias, Pgenval, fun_id, def, body))))))
     | _ ->
@@ -182,16 +138,11 @@ let rec prepare env (lam : L.lambda) (k : L.lambda -> L.lambda) =
         Printlambda.lambda lam
     end
   | Llet (let_kind, value_kind, id, defining_expr, body) ->
-    prepare env defining_expr (fun defining_expr ->
-      let env =
-        match let_kind with
-        | Strict | StrictOpt | Alias -> env
-        | Variable -> Env.add_mutable env id
-      in
-      prepare env body (fun body ->
+    prepare defining_expr (fun defining_expr ->
+      prepare body (fun body ->
         k (L.Llet (let_kind, value_kind, id, defining_expr, body))))
   | Lletrec (bindings, body) ->
-    prepare_list_with_flatten_map env bindings
+    prepare_list_with_flatten_map bindings
       ~flatten_map:(fun fun_id (binding : L.lambda) ->
         match binding with
         | Lfunction { kind; params; body = fbody; attr; loc; return; _ } ->
@@ -199,22 +150,18 @@ let rec prepare env (lam : L.lambda) (k : L.lambda -> L.lambda) =
             ~body:fbody ~return ~attr ~loc
         | _ -> [fun_id, binding])
       (fun bindings ->
-        prepare env body (fun body ->
+        prepare body (fun body ->
           k (L.Lletrec (bindings, body))))
-  | Lprim (Pfield _, [Lprim (Pgetglobal id, [],_)], _)
-      when Ident.same id (Env.current_unit_id env) ->
-    Misc.fatal_error "[Pfield (Pgetglobal ...)] for the current compilation \
-      unit is forbidden upon entry to the middle end"
   | Lprim (prim, args, loc) ->
-    prepare_list env args (fun args ->
+    prepare_list args (fun args ->
       k (Lprim (prim, args, loc)))
   | Lswitch (scrutinee, switch, loc) ->
-    prepare env scrutinee (fun scrutinee ->
+    prepare scrutinee (fun scrutinee ->
       let const_nums, sw_consts = List.split switch.sw_consts in
       let block_nums, sw_blocks = List.split switch.sw_blocks in
-      prepare_option env switch.sw_failaction (fun sw_failaction ->
-        prepare_list env sw_consts (fun sw_consts ->
-          prepare_list env sw_blocks (fun sw_blocks ->
+      prepare_option switch.sw_failaction (fun sw_failaction ->
+        prepare_list sw_consts (fun sw_consts ->
+          prepare_list sw_blocks (fun sw_blocks ->
             let switch : L.lambda_switch =
               { sw_numconsts = switch.sw_numconsts;
                 sw_consts = List.combine const_nums sw_consts;
@@ -225,93 +172,78 @@ let rec prepare env (lam : L.lambda) (k : L.lambda -> L.lambda) =
             in
             k (Lswitch (scrutinee, switch, loc))))))
   | Lstringswitch (scrutinee, cases, default, loc) ->
-    prepare env scrutinee (fun scrutinee ->
+    prepare scrutinee (fun scrutinee ->
       let patterns, actions = List.split cases in
-      prepare_list env actions (fun actions ->
-        prepare_option env default (fun default ->
+      prepare_list actions (fun actions ->
+        prepare_option default (fun default ->
           let cases = List.combine patterns actions in
           k (L.Lstringswitch (scrutinee, cases, default, loc)))))
   | Lstaticraise (cont, args) ->
-    prepare_list env args (fun args ->
+    prepare_list args (fun args ->
       k (L.Lstaticraise (cont, args)))
   | Lstaticcatch (body, (cont, args), handler) ->
-    let env_body = Env.add_continuation env cont in
-    prepare env_body body (fun body ->
-      prepare env handler (fun handler ->
+    prepare body (fun body ->
+      prepare handler (fun handler ->
         k (L.Lstaticcatch (body, (cont, args), handler))))
   | Ltrywith (body, id, handler) ->
-    prepare env body (fun body ->
-      prepare env handler (fun handler ->
+    prepare body (fun body ->
+      prepare handler (fun handler ->
         k (L.Ltrywith (body, id, handler))))
   | Lifthenelse (cond, ifso, ifnot) ->
-    prepare env cond (fun cond ->
-      prepare env ifso (fun ifso ->
-        prepare env ifnot (fun ifnot ->
+    prepare cond (fun cond ->
+      prepare ifso (fun ifso ->
+        prepare ifnot (fun ifnot ->
           k (L.Lifthenelse(cond, ifso, ifnot)))))
   | Lsequence (lam1, lam2) ->
-    prepare env lam1 (fun lam1 ->
-      prepare env lam2 (fun lam2 ->
+    prepare lam1 (fun lam1 ->
+      prepare lam2 (fun lam2 ->
         k (L.Lsequence(lam1, lam2))))
   | Lwhile (cond, body) ->
-    prepare env cond (fun cond ->
-      prepare env body (fun body ->
+    prepare cond (fun cond ->
+      prepare body (fun body ->
         k (Lwhile (cond, body))))
   | Lfor (ident, start, stop, dir, body) ->
-    prepare env start (fun start ->
-      prepare env stop (fun stop ->
-        prepare env body (fun body ->
+    prepare start (fun start ->
+      prepare stop (fun stop ->
+        prepare body (fun body ->
           k (L.Lfor (ident, start, stop, dir, body)))))
   | Lassign (ident, lam) ->
-    if not (Env.is_mutable env ident) then begin
-      Misc.fatal_errorf "Lassign on non-mutable variable %a"
-        Ident.print ident
-    end;
-    prepare env lam (fun lam -> k (L.Lassign (ident, lam)))
+    prepare lam (fun lam -> k (L.Lassign (ident, lam)))
   | Lsend (meth_kind, meth, obj, args, loc) ->
-    prepare env meth (fun meth ->
-      prepare env obj (fun obj ->
-        prepare_list env args (fun args ->
+    prepare meth (fun meth ->
+      prepare obj (fun obj ->
+        prepare_list args (fun args ->
           k (L.Lsend (meth_kind, meth, obj, args, loc)))))
-  | Levent (body, _event) -> prepare env body k
-  | Lifused _ ->
-    (* [Lifused] is used to mark that this expression should be alive only if
-       an identifier is.  Every use should have been removed by
-       [Simplif.simplify_lets], either by replacing by the inner expression,
-       or by completely removing it (replacing by unit). *)
-    Misc.fatal_error "[Lifused] should have been removed by \
-        [Simplif.simplify_lets]"
+  | Levent (body, event) ->
+    prepare body (fun body -> k (L.Levent (body, event)))
+  | Lifused _ -> k lam
 
-and prepare_list env lams k =
+and prepare_list lams k =
   match lams with
   | [] -> k []
   | lam::lams ->
-    prepare env lam (fun lam ->
-      prepare_list env lams (fun lams -> k (lam::lams)))
+    prepare lam (fun lam ->
+      prepare_list lams (fun lams -> k (lam::lams)))
 
-and prepare_list_with_idents env lams k =
+and prepare_list_with_idents lams k =
   match lams with
   | [] -> k []
   | (id, lam)::lams ->
-    prepare env lam (fun lam ->
-      prepare_list_with_idents env lams (fun lams -> k ((id, lam)::lams)))
+    prepare lam (fun lam ->
+      prepare_list_with_idents lams (fun lams -> k ((id, lam)::lams)))
 
-and prepare_list_with_flatten_map env lams ~flatten_map k =
+and prepare_list_with_flatten_map lams ~flatten_map k =
   match lams with
   | [] -> k []
   | (id, lam)::lams ->
-    prepare_list_with_idents env (flatten_map id lam) (fun mapped ->
-      prepare_list_with_flatten_map env lams ~flatten_map (fun lams ->
+    prepare_list_with_idents (flatten_map id lam) (fun mapped ->
+      prepare_list_with_flatten_map lams ~flatten_map (fun lams ->
         k (mapped @ lams)))
 
-and prepare_option env lam_opt k =
+and prepare_option lam_opt k =
   match lam_opt with
   | None -> k None
-  | Some lam -> prepare env lam (fun lam -> k (Some lam))
+  | Some lam -> prepare lam (fun lam -> k (Some lam))
 
 let run lam =
-  let current_unit_id =
-    Compilation_unit.get_persistent_ident
-      (Compilation_unit.get_current_exn ())
-  in
-  let env = Env.create ~current_unit_id in
-  prepare env lam (fun lam -> lam)
+  prepare lam (fun lam -> lam)
