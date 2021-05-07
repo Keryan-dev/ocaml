@@ -999,9 +999,8 @@ and cps_switch (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
       cases
   in
   let consts_rev, wrappers = convert_arms_rev switch.sw_consts [] in
-  let blocks_rev, wrappers = convert_arms_rev
-    (List.combine block_nums sw_blocks)
-    wrappers
+  let blocks_rev, wrappers =
+    convert_arms_rev (List.combine block_nums sw_blocks) wrappers
   in
   let consts = List.rev consts_rev in
   let blocks = List.rev blocks_rev in
@@ -1030,7 +1029,7 @@ and cps_switch (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
     let const_switch = I.Switch (scrutinee, const_switch) in
     let scrutinee_tag = Ident.create_local "scrutinee_tag" in
     let block_switch =
-      I.Let ( scrutinee_tag,
+      I.Let (scrutinee_tag,
         Not_user_visible,
         Pintval,
         Prim { prim = Pgettag;
@@ -1052,7 +1051,7 @@ and cps_switch (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
       in
       let is_scrutinee_int = Ident.create_local "is_scrutinee_int" in
       let isint_switch =
-        I.Let ( is_scrutinee_int,
+        I.Let (is_scrutinee_int,
           Not_user_visible,
           Pintval,
           Prim { prim = Pflambda_isint;
