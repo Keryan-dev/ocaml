@@ -528,7 +528,7 @@ let rec_catch_for_for_loop
 let let_cont_with_extra_params env ~continuation_on_stack ~is_exn_handler
       ~params ~(recursive : Asttypes.rec_flag)
       ~(body : Env.t -> Continuation.t -> Ilambda.t)
-      ~(handler : Env.t -> Continuation.t -> Ilambda.t) : Ilambda.t =
+      ~(handler : Env.t -> Ilambda.t) : Ilambda.t =
   let cont = Continuation.create () in
   let { Env. body_env; handler_env; extra_params } =
     Env.add_continuation env cont
@@ -543,7 +543,7 @@ let let_cont_with_extra_params env ~continuation_on_stack ~is_exn_handler
     params = params @ extra_params;
     recursive;
     body = body body_env cont;
-    handler = handler handler_env cont;
+    handler = handler handler_env;
   }
 
 let apply_cont_with_extra_args env cont traps args =
@@ -616,8 +616,7 @@ let rec cps_non_tail env (lam : L.lambda)
             }
             in
             wrap_apply_with_extra_params env apply)
-          ~handler:(fun env _cont ->
-            k env result_var)
+          ~handler:(fun env -> k env result_var)
          ) k_exn)
       k_exn
   | Lfunction func ->
@@ -633,7 +632,7 @@ let rec cps_non_tail env (lam : L.lambda)
       ~recursive:Nonrecursive
       ~body:(fun env after_defining_expr ->
           cps_tail env defining_expr after_defining_expr k_exn)
-      ~handler:(fun env _cont ->
+      ~handler:(fun env ->
           let env, new_id = Env.add_mutable_and_make_new_id env id value_kind in
           let body = cps_non_tail env body k k_exn in
           Let (new_id, User_visible, value_kind, Simple (Var temp_id), body))
@@ -677,7 +676,7 @@ let rec cps_non_tail env (lam : L.lambda)
       ~recursive:Nonrecursive
       ~body:(fun env after_defining_expr ->
         cps_tail env defining_expr after_defining_expr k_exn)
-      ~handler:(fun env _cont ->
+      ~handler:(fun env ->
         cps_non_tail env body k k_exn)
   | Lletrec (bindings, body) ->
     let bindings = cps_function_bindings env bindings in
@@ -713,7 +712,7 @@ let rec cps_non_tail env (lam : L.lambda)
       ~recursive:Nonrecursive
       ~body:(fun env after_switch ->
         cps_switch env switch ~scrutinee after_switch k_exn)
-      ~handler:(fun env _cont -> k env result_var)
+      ~handler:(fun env -> k env result_var)
   | Lstringswitch (scrutinee, cases, default, loc) ->
     cps_non_tail env (Matching.expand_stringswitch loc scrutinee cases default)
       k k_exn
@@ -758,7 +757,7 @@ let rec cps_non_tail env (lam : L.lambda)
           body;
           handler;
         })
-      ~handler:(fun env _cont -> k env result_var)
+      ~handler:(fun env -> k env result_var)
   | Lsend (meth_kind, meth, obj, args, loc) ->
     cps_non_tail_simple env obj (fun env obj ->
       cps_non_tail env meth (fun env meth ->
@@ -786,7 +785,7 @@ let rec cps_non_tail env (lam : L.lambda)
                 specialised = Default_specialise;
               } in
               wrap_apply_with_extra_params env apply)
-            ~handler:(fun env _cont -> k env result_var))
+            ~handler:(fun env -> k env result_var))
           k_exn) k_exn) k_exn
   | Ltrywith (body, id, handler) ->
     let body_result = Ident.create_local "body_result" in
@@ -817,17 +816,17 @@ let rec cps_non_tail env (lam : L.lambda)
                         exn_handler = handler_continuation;
                       }))
                       [])
-                  ~handler:(fun env _cont ->
+                  ~handler:(fun env ->
                     cps_tail env body poptrap_continuation
                       handler_continuation))
-              ~handler:(fun env _cont ->
+              ~handler:(fun env ->
                 apply_cont_with_extra_args env
                   after_continuation
                   (Some (I.Pop { exn_handler = handler_continuation; }))
                   [Ilambda.Var body_result]))
-          ~handler:(fun env _cont ->
+          ~handler:(fun env ->
             cps_tail env handler after_continuation k_exn))
-      ~handler:(fun env _cont -> k env result_var)
+      ~handler:(fun env -> k env result_var)
   | Lifthenelse (cond, ifso, ifnot) ->
     let lam = switch_for_if_then_else ~cond ~ifso ~ifnot in
     cps_non_tail env lam k k_exn
@@ -933,7 +932,7 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
       ~recursive:Nonrecursive
       ~body:(fun env after_defining_expr ->
           cps_tail env defining_expr after_defining_expr k_exn)
-      ~handler:(fun env _cont ->
+      ~handler:(fun env ->
           let env, new_id = Env.add_mutable_and_make_new_id env id value_kind in
           let body = cps_tail env body k k_exn in
           Let (new_id, User_visible, value_kind, Simple (Var temp_id), body))
@@ -994,7 +993,7 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
       ~recursive:Nonrecursive
       ~body:(fun env after_defining_expr ->
         cps_tail env defining_expr after_defining_expr k_exn)
-      ~handler:(fun env _cont ->
+      ~handler:(fun env ->
         cps_tail env body k k_exn)
   | Lletrec (bindings, body) ->
     let bindings = cps_function_bindings env bindings in
@@ -1116,15 +1115,15 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
                   body_continuation
                   (Some (I.Push { exn_handler = handler_continuation; }))
                   [])
-              ~handler:(fun env _cont ->
+              ~handler:(fun env ->
                   cps_tail env body
                     poptrap_continuation handler_continuation))
-          ~handler:(fun env _cont ->
+          ~handler:(fun env ->
               apply_cont_with_extra_args env
                 k
                 (Some (I.Pop { exn_handler = handler_continuation; }))
                 [Ilambda.Var body_result]))
-      ~handler:(fun env _cont ->
+      ~handler:(fun env ->
         cps_tail env handler k k_exn)
   | Lifthenelse (cond, ifso, ifnot) ->
     let lam = switch_for_if_then_else ~cond ~ifso ~ifnot in
@@ -1256,7 +1255,7 @@ and cps_switch env (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
         switch.sw_numblocks
     end;
   let convert_arms_rev env cases wrappers =
-    List.fold_left (fun (env, consts_rev, wrappers)
+    List.fold_left (fun (consts_rev, wrappers)
                      (arm, (action : L.lambda)) ->
         match action with
         | Lvar var when not (Env.is_mutable env var) ->
@@ -1267,7 +1266,7 @@ and cps_switch env (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
           let consts_rev =
             (arm, k, None, (Ilambda.Var var)::extra_args):: consts_rev
           in
-          env, consts_rev, wrappers
+          consts_rev, wrappers
         | Lconst cst ->
           let extra_args =
             List.map (fun arg : Ilambda.simple -> Var arg)
@@ -1276,7 +1275,7 @@ and cps_switch env (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
           let consts_rev =
             (arm, k, None, (Ilambda.Const cst)::extra_args) :: consts_rev
           in
-          env, consts_rev, wrappers
+          consts_rev, wrappers
         | Lvar _ (* mutable *)
         | Lapply _
         | Lfunction _
@@ -1301,32 +1300,32 @@ and cps_switch env (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
           match action with
           | Apply_cont (cont, trap, args) ->
             let consts_rev = (arm, cont, trap, args) :: consts_rev in
-            env, consts_rev, wrappers
+            consts_rev, wrappers
           | Let _ | Let_mutable _ | Let_rec _ | Let_cont _ | Apply _
           | Switch _ ->
             let consts_rev = (arm, cont, None, []) :: consts_rev in
             let wrappers = (cont, [], action) :: wrappers in
-            env, consts_rev, wrappers)
-      (env, [], wrappers)
+            consts_rev, wrappers)
+      ([], wrappers)
       cases
   in
   cps_non_tail env scrutinee (fun env scrutinee ->
-      let env, consts_rev, wrappers =
+      let consts_rev, wrappers =
         convert_arms_rev env switch.sw_consts []
       in
-      let env, blocks_rev, wrappers =
+      let blocks_rev, wrappers =
         convert_arms_rev env (List.combine block_nums sw_blocks) wrappers
       in
       let consts = List.rev consts_rev in
       let blocks = List.rev blocks_rev in
-      let _env, failaction, wrappers =
+      let failaction, wrappers =
         match switch.sw_failaction with
-        | None -> env, None, wrappers
+        | None -> None, wrappers
         | Some action ->
           let cont = Continuation.create () in
           let action = cps_tail env action k k_exn in
           let wrappers = (cont, [], action) :: wrappers in
-          env, Some (cont, None, []), wrappers
+          Some (cont, None, []), wrappers
       in
       let const_switch : I.switch =
         { numconsts = switch.sw_numconsts;
