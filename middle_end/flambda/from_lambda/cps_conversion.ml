@@ -38,13 +38,13 @@ module Env : sig
   val is_mutable : t -> Ident.t -> bool
   val has_mutables : t -> bool
 
-  val add_mutable_and_make_new_id
+  val register_mutable_variable
      : t
     -> Ident.t
     -> Lambda.value_kind
     -> t * Ident.t
 
-  val new_id_for_mutable : t -> Ident.t -> t * Ident.t * Lambda.value_kind
+  val update_mutable_variable : t -> Ident.t -> t * Ident.t * Lambda.value_kind
 
   type add_continuation_result = private {
     body_env : t;
@@ -82,7 +82,7 @@ module Env : sig
     -> Continuation.t
     -> (Ident.t * Lambda.value_kind) list
 
-  val rename_mutable_variable : t -> Ident.t -> Ident.t
+  val get_mutable_variable : t -> Ident.t -> Ident.t
 end = struct
   type t = {
     current_unit_id : Ident.t;
@@ -122,7 +122,7 @@ end = struct
   let has_mutables t =
     !(t.has_mutables)
 
-  let add_mutable_and_make_new_id t id kind =
+  let register_mutable_variable t id kind =
     if Ident.Map.mem id t.current_values_of_mutables_in_scope then begin
       Misc.fatal_errorf "Redefinition of mutable variable %a"
         Ident.print id
@@ -138,7 +138,7 @@ end = struct
     in
     t, new_id
 
-  let new_id_for_mutable t id =
+  let update_mutable_variable t id =
     match Ident.Map.find id t.current_values_of_mutables_in_scope with
     | exception Not_found ->
       Misc.fatal_errorf "Mutable variable %a not in environment"
@@ -199,8 +199,7 @@ end = struct
       }
     in
     let extra_params =
-      List.map snd
-        (Ident.Map.bindings handler_env.current_values_of_mutables_in_scope)
+      Ident.Map.data handler_env.current_values_of_mutables_in_scope
     in
     { body_env;
       handler_env;
@@ -266,7 +265,7 @@ end = struct
   let extra_args_for_continuation t cont =
     List.map fst (extra_args_for_continuation_with_kinds t cont)
 
-  let rename_mutable_variable t id =
+  let get_mutable_variable t id =
     match Ident.Map.find id t.current_values_of_mutables_in_scope with
     | exception Not_found ->
       Misc.fatal_errorf "Mutable variable %a not bound in env"
@@ -525,14 +524,14 @@ let rec_catch_for_for_loop
           L.lambda_unit)))
   in env, lam
 
-let let_cont_with_extra_params env ~continuation_on_stack ~is_exn_handler
-      ~params ~(recursive : Asttypes.rec_flag)
+let let_cont_nonrecursive_with_extra_params env ~is_exn_handler
+      ~params
       ~(body : Env.t -> Continuation.t -> Ilambda.t)
       ~(handler : Env.t -> Ilambda.t) : Ilambda.t =
   let cont = Continuation.create () in
   let { Env. body_env; handler_env; extra_params } =
     Env.add_continuation env cont
-      ~push_to_try_stack:continuation_on_stack recursive
+      ~push_to_try_stack:is_exn_handler Nonrecursive
   in
   let extra_params =
      List.map (fun (id, kind) -> id, Ilambda.User_visible, kind) extra_params
@@ -541,7 +540,7 @@ let let_cont_with_extra_params env ~continuation_on_stack ~is_exn_handler
     name = cont;
     is_exn_handler;
     params = params @ extra_params;
-    recursive;
+    recursive = Nonrecursive;
     body = body body_env cont;
     handler = handler handler_env;
   }
@@ -583,7 +582,7 @@ let rec cps_non_tail env (lam : L.lambda)
   | Lvar id ->
     if Env.is_mutable env id then
       name_then_cps_non_tail env "mutable_read"
-        (I.Simple (Var (Env.rename_mutable_variable env id))) k k_exn
+        (I.Simple (Var (Env.get_mutable_variable env id))) k k_exn
     else
       k env id
   | Lconst const ->
@@ -593,10 +592,9 @@ let rec cps_non_tail env (lam : L.lambda)
     cps_non_tail_list env ap_args (fun env args ->
       cps_non_tail env ap_func (fun env func ->
         let result_var = Ident.create_local "apply_result" in
-        let_cont_with_extra_params env ~continuation_on_stack:false
+        let_cont_nonrecursive_with_extra_params env
           ~is_exn_handler:false
           ~params:[result_var, I.Not_user_visible, Pgenval]
-          ~recursive:Nonrecursive
           ~body:(fun env continuation ->
             let exn_continuation : I.exn_continuation =
               { exn_handler = k_exn;
@@ -626,14 +624,13 @@ let rec cps_non_tail env (lam : L.lambda)
     I.Let_rec ([id, func], body)
   | Llet (Variable, value_kind, id, defining_expr, body) ->
     let temp_id = Ident.create_local "let_mutable" in
-    let_cont_with_extra_params env ~continuation_on_stack:false
+    let_cont_nonrecursive_with_extra_params env
       ~is_exn_handler:false
       ~params:[temp_id, I.Not_user_visible, value_kind]
-      ~recursive:Nonrecursive
       ~body:(fun env after_defining_expr ->
           cps_tail env defining_expr after_defining_expr k_exn)
       ~handler:(fun env ->
-          let env, new_id = Env.add_mutable_and_make_new_id env id value_kind in
+          let env, new_id = Env.register_mutable_variable env id value_kind in
           let body = cps_non_tail env body k k_exn in
           Let (new_id, User_visible, value_kind, Simple (Var temp_id), body))
   | Llet ((Strict | Alias | StrictOpt), Pgenval, fun_id,
@@ -670,10 +667,9 @@ let rec cps_non_tail env (lam : L.lambda)
       cps_non_tail env (L.Llet (let_kind, value_kind, id, lam, body)) k k_exn
     end
   | Llet (_let_kind, value_kind, id, defining_expr, body) ->
-    let_cont_with_extra_params env ~continuation_on_stack:false
+    let_cont_nonrecursive_with_extra_params env
       ~is_exn_handler:false
       ~params:[id, I.User_visible, value_kind]
-      ~recursive:Nonrecursive
       ~body:(fun env after_defining_expr ->
         cps_tail env defining_expr after_defining_expr k_exn)
       ~handler:(fun env ->
@@ -706,10 +702,9 @@ let rec cps_non_tail env (lam : L.lambda)
     end
   | Lswitch (scrutinee, switch, _loc) ->
     let result_var = Ident.create_local "switch_result" in
-    let_cont_with_extra_params env ~continuation_on_stack:false
+    let_cont_nonrecursive_with_extra_params env
       ~is_exn_handler:false
       ~params:[result_var, I.Not_user_visible, Pgenval]
-      ~recursive:Nonrecursive
       ~body:(fun env after_switch ->
         cps_switch env switch ~scrutinee after_switch k_exn)
       ~handler:(fun env -> k env result_var)
@@ -728,10 +723,9 @@ let rec cps_non_tail env (lam : L.lambda)
       ) k_exn
   | Lstaticcatch (body, (static_exn, args), handler) ->
     let result_var = Ident.create_local "staticcatch_result" in
-    let_cont_with_extra_params env ~continuation_on_stack:false
+    let_cont_nonrecursive_with_extra_params env
       ~is_exn_handler:false
       ~params:[result_var, I.Not_user_visible, Pgenval]
-      ~recursive:Nonrecursive
       ~body:(fun env after_continuation ->
         let continuation = Continuation.create () in
         let { Env. body_env; handler_env; extra_params } =
@@ -763,10 +757,9 @@ let rec cps_non_tail env (lam : L.lambda)
       cps_non_tail env meth (fun env meth ->
         cps_non_tail_list env args (fun env args ->
           let result_var = Ident.create_local "send_result" in
-          let_cont_with_extra_params env ~continuation_on_stack:false
+          let_cont_nonrecursive_with_extra_params env
             ~is_exn_handler:false
             ~params:[result_var, Not_user_visible, Pgenval]
-            ~recursive:Nonrecursive
             ~body:(fun env continuation ->
               let exn_continuation : I.exn_continuation =
                 { exn_handler = k_exn;
@@ -790,25 +783,21 @@ let rec cps_non_tail env (lam : L.lambda)
   | Ltrywith (body, id, handler) ->
     let body_result = Ident.create_local "body_result" in
     let result_var = Ident.create_local "try_with_result" in
-    let_cont_with_extra_params env ~continuation_on_stack:false
+    let_cont_nonrecursive_with_extra_params env
       ~is_exn_handler:false
       ~params:[result_var, Not_user_visible, Pgenval]
-      ~recursive:Nonrecursive
       ~body:(fun env after_continuation ->
-        let_cont_with_extra_params env ~continuation_on_stack:true
+        let_cont_nonrecursive_with_extra_params env
           ~is_exn_handler:true
           ~params:[id, User_visible, Pgenval]
-          ~recursive:Nonrecursive
           ~body:(fun env handler_continuation ->
-            let_cont_with_extra_params env ~continuation_on_stack:false
+            let_cont_nonrecursive_with_extra_params env
               ~is_exn_handler:false
               ~params:[body_result, Not_user_visible, Pgenval]
-              ~recursive:Nonrecursive
               ~body:(fun env poptrap_continuation ->
-                let_cont_with_extra_params env ~continuation_on_stack:false
+                let_cont_nonrecursive_with_extra_params env
                   ~is_exn_handler:false
                   ~params:[]
-                  ~recursive:Nonrecursive
                   ~body:(fun env body_continuation ->
                     apply_cont_with_extra_args env
                       body_continuation
@@ -845,7 +834,9 @@ let rec cps_non_tail env (lam : L.lambda)
         Ident.print being_assigned
     end;
     cps_non_tail_simple env new_value (fun env new_value ->
-        let env, new_id, new_kind = Env.new_id_for_mutable env being_assigned in
+        let env, new_id, new_kind =
+          Env.update_mutable_variable env being_assigned
+        in
         I.Let (new_id, User_visible, new_kind,
           Simple new_value,
           name_then_cps_non_tail env "assign"
@@ -895,7 +886,7 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
   | Lvar id ->
     if Env.is_mutable env id then
       name_then_cps_tail env "mutable_read"
-        (I.Simple (Var (Env.rename_mutable_variable env id))) k k_exn
+        (I.Simple (Var (Env.get_mutable_variable env id))) k k_exn
     else
       apply_cont_with_extra_args env k None [Ilambda.Var id]
   | Lconst const ->
@@ -926,14 +917,13 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
     Let_rec ([id, func], apply_cont_with_extra_args env k None [Ilambda.Var id])
   | Llet (Variable, value_kind, id, defining_expr, body) ->
     let temp_id = Ident.create_local "let_mutable" in
-    let_cont_with_extra_params env ~continuation_on_stack:false
+    let_cont_nonrecursive_with_extra_params env
       ~is_exn_handler:false
       ~params:[temp_id, Not_user_visible, value_kind]
-      ~recursive:Nonrecursive
       ~body:(fun env after_defining_expr ->
           cps_tail env defining_expr after_defining_expr k_exn)
       ~handler:(fun env ->
-          let env, new_id = Env.add_mutable_and_make_new_id env id value_kind in
+          let env, new_id = Env.register_mutable_variable env id value_kind in
           let body = cps_tail env body k k_exn in
           Let (new_id, User_visible, value_kind, Simple (Var temp_id), body))
   | Llet ((Strict | Alias | StrictOpt), Pgenval, fun_id,
@@ -978,7 +968,9 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
         Ident.print being_assigned
     end;
     cps_non_tail_simple env new_value (fun env new_value ->
-        let env, new_id, new_kind = Env.new_id_for_mutable env being_assigned in
+        let env, new_id, new_kind =
+          Env.update_mutable_variable env being_assigned
+        in
         let body = cps_tail env body k k_exn in
         I.Let (new_id, User_visible, new_kind,
           Simple new_value,
@@ -987,10 +979,9 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
             body)))
       k_exn
   | Llet (_let_kind, value_kind, id, defining_expr, body) ->
-    let_cont_with_extra_params env ~continuation_on_stack:false
+    let_cont_nonrecursive_with_extra_params env
       ~is_exn_handler:false
       ~params:[id, User_visible, value_kind]
-      ~recursive:Nonrecursive
       ~body:(fun env after_defining_expr ->
         cps_tail env defining_expr after_defining_expr k_exn)
       ~handler:(fun env ->
@@ -1087,7 +1078,9 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
         Ident.print being_assigned
     end;
     cps_non_tail_simple env new_value (fun env new_value ->
-        let env, new_id, new_kind = Env.new_id_for_mutable env being_assigned in
+        let env, new_id, new_kind =
+          Env.update_mutable_variable env being_assigned
+        in
         I.Let (new_id, User_visible, new_kind,
           Simple new_value,
           name_then_cps_tail env "assign"
@@ -1096,20 +1089,17 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
       k_exn
   | Ltrywith (body, id, handler) ->
     let body_result = Ident.create_local "body_result" in
-    let_cont_with_extra_params env ~continuation_on_stack:true
+    let_cont_nonrecursive_with_extra_params env
       ~is_exn_handler:true
       ~params:[id, User_visible, Pgenval]
-      ~recursive:Nonrecursive
       ~body:(fun env handler_continuation ->
-        let_cont_with_extra_params env ~continuation_on_stack:false
+        let_cont_nonrecursive_with_extra_params env
           ~is_exn_handler:false
           ~params:[body_result, Not_user_visible, Pgenval]
-          ~recursive:Nonrecursive
           ~body:(fun env poptrap_continuation ->
-            let_cont_with_extra_params env ~continuation_on_stack:false
+            let_cont_nonrecursive_with_extra_params env
               ~is_exn_handler:false
               ~params:[]
-              ~recursive:Nonrecursive
               ~body:(fun env body_continuation ->
                 apply_cont_with_extra_args env
                   body_continuation
