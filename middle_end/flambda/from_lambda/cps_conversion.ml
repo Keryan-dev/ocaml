@@ -30,7 +30,7 @@ module Env : sig
   val create
      : current_unit_id:Ident.t
     -> return_continuation:Continuation.t
-    -> exn_continuation:Ilambda.exn_continuation
+    -> exn_continuation:Continuation.t
     -> t
 
   val current_unit_id : t -> Ident.t
@@ -97,11 +97,11 @@ end = struct
   }
 
   let create ~current_unit_id  ~return_continuation
-        ~(exn_continuation : Ilambda.exn_continuation) =
+        ~exn_continuation =
     let mutables_needed_by_continuations =
       Continuation.Map.of_list [
         return_continuation, Ident.Set.empty;
-        exn_continuation.exn_handler, Ident.Set.empty;
+        exn_continuation, Ident.Set.empty;
       ]
     in
     { current_unit_id;
@@ -552,7 +552,7 @@ let apply_cont_with_extra_args env cont traps args =
   in
   I.Apply_cont (cont, traps, args @ extra_args)
 
-let wrap_apply_with_extra_params env (apply : Ilambda.apply) =
+let wrap_return_continuation env (apply : Ilambda.apply) =
   let extra_args = Env.extra_args_for_continuation env apply.continuation in
   match extra_args with
   | [] -> I.Apply apply
@@ -613,7 +613,7 @@ let rec cps_non_tail env (lam : L.lambda)
               specialised = ap_specialised;
             }
             in
-            wrap_apply_with_extra_params env apply)
+            wrap_return_continuation env apply)
           ~handler:(fun env -> k env result_var)
          ) k_exn)
       k_exn
@@ -777,7 +777,7 @@ let rec cps_non_tail env (lam : L.lambda)
                 inlined = Default_inline;
                 specialised = Default_specialise;
               } in
-              wrap_apply_with_extra_params env apply)
+              wrap_return_continuation env apply)
             ~handler:(fun env -> k env result_var))
           k_exn) k_exn) k_exn
   | Ltrywith (body, id, handler) ->
@@ -840,7 +840,7 @@ let rec cps_non_tail env (lam : L.lambda)
         I.Let (new_id, User_visible, new_kind,
           Simple new_value,
           name_then_cps_non_tail env "assign"
-            (I.Simple (Const (Const_base (Const_int 0))))
+            (I.Simple (Const L.const_unit))
             k k_exn))
       k_exn
   | Levent (body, _event) -> cps_non_tail env body k k_exn
@@ -910,7 +910,7 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
           inlined = apply.ap_inlined;
           specialised = apply.ap_specialised;
         } in
-        wrap_apply_with_extra_params env apply) k_exn) k_exn
+        wrap_return_continuation env apply) k_exn) k_exn
   | Lfunction func ->
     let id = Ident.create_local (name_for_function func) in
     let func = cps_function env ~stub:false func in
@@ -968,11 +968,11 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
         Ident.print being_assigned
     end;
     cps_non_tail_simple env new_value (fun env new_value ->
-        let env, new_id, new_kind =
+        let env, new_id, kind =
           Env.update_mutable_variable env being_assigned
         in
         let body = cps_tail env body k k_exn in
-        I.Let (new_id, User_visible, new_kind,
+        I.Let (new_id, User_visible, kind,
           Simple new_value,
           I.Let (id, Not_user_visible, Pgenval,
             Simple (Const (Const_base (Const_int 0))),
@@ -1071,17 +1071,17 @@ and cps_tail env (lam : L.lambda) (k : Continuation.t) (k_exn : Continuation.t)
             inlined = Default_inline;
             specialised = Default_specialise;
           } in
-          wrap_apply_with_extra_params env apply) k_exn) k_exn) k_exn
+          wrap_return_continuation env apply) k_exn) k_exn) k_exn
   | Lassign (being_assigned, new_value) ->
     if not (Env.is_mutable env being_assigned) then begin
       Misc.fatal_errorf "Lassign on non-mutable variable %a"
         Ident.print being_assigned
     end;
     cps_non_tail_simple env new_value (fun env new_value ->
-        let env, new_id, new_kind =
+        let env, new_id, kind =
           Env.update_mutable_variable env being_assigned
         in
-        I.Let (new_id, User_visible, new_kind,
+        I.Let (new_id, User_visible, kind,
           Simple new_value,
           name_then_cps_tail env "assign"
             (I.Simple (Const (Const_base (Const_int 0))))
@@ -1195,18 +1195,15 @@ and cps_function env ~stub
   let body_cont = Continuation.create ~sort:Return () in
   let body_exn_cont = Continuation.create () in
   let free_idents_of_body = Lambda.free_variables body in
-  let exn_continuation : I.exn_continuation =
-    { exn_handler = body_exn_cont;
-      extra_args = [];
-    }
-  in
   let new_env = Env.create ~current_unit_id:(Env.current_unit_id env)
-    ~return_continuation:body_cont ~exn_continuation
+    ~return_continuation:body_cont ~exn_continuation:body_exn_cont
   in
   let body = cps_tail new_env body body_cont body_exn_cont in
   { kind = kind;
     return_continuation = body_cont;
-    exn_continuation;
+    exn_continuation = {
+      exn_handler = body_exn_cont;
+      extra_args = [] };
     params = params;
     return;
     body;
@@ -1285,6 +1282,10 @@ and cps_switch env (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
         | Lsend _
         | Levent _
         | Lifused _ ->
+          (* The continuations created here (and for failactions) are local
+             and their bodies will not modify mutable variables. Hence, it is
+             safe to exclude them from passing along the extra arguments for
+             mutable values, and allows a shortcut for Apply_cont. *)
           let cont = Continuation.create () in
           let action = cps_tail env action k k_exn in
           match action with
@@ -1294,7 +1295,7 @@ and cps_switch env (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
           | Let _ | Let_mutable _ | Let_rec _ | Let_cont _ | Apply _
           | Switch _ ->
             let consts_rev = (arm, cont, None, []) :: consts_rev in
-            let wrappers = (cont, [], action) :: wrappers in
+            let wrappers = (cont, action) :: wrappers in
             consts_rev, wrappers)
       ([], wrappers)
       cases
@@ -1314,7 +1315,7 @@ and cps_switch env (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
         | Some action ->
           let cont = Continuation.create () in
           let action = cps_tail env action k k_exn in
-          let wrappers = (cont, [], action) :: wrappers in
+          let wrappers = (cont, action) :: wrappers in
           Some (cont, None, []), wrappers
       in
       let const_switch : I.switch =
@@ -1366,12 +1367,12 @@ and cps_switch env (switch : L.lambda_switch) ~scrutinee (k : Continuation.t)
               I.Switch(is_scrutinee_int, isint_switch))
           in
           isint_switch,
-          ((const_cont, [], const_switch)
-           ::(block_cont, [], block_switch)
+          ((const_cont, const_switch)
+           ::(block_cont, block_switch)
            ::wrappers)
       in
       let switch, wrappers = build_switch scrutinee wrappers in
-      List.fold_left (fun body (cont, _extra_params, action) ->
+      List.fold_left (fun body (cont, action) ->
           I.Let_cont {
             name = cont;
             is_exn_handler = false;
@@ -1389,18 +1390,15 @@ let lambda_to_ilambda lam : Ilambda.program =
       (Compilation_unit.get_current_exn ())
   in
   let return_continuation = Continuation.create ~sort:Define_root_symbol () in
-  let the_end_exn = Continuation.create () in
-  let exn_continuation : I.exn_continuation =
-    { exn_handler = the_end_exn;
-      extra_args = [];
-    }
-  in
+  let exn_continuation = Continuation.create () in
   let env = Env.create ~current_unit_id
     ~return_continuation ~exn_continuation
   in
-  let ilam = cps_tail env lam return_continuation the_end_exn in
+  let ilam = cps_tail env lam return_continuation exn_continuation in
   { expr = ilam;
     return_continuation;
-    exn_continuation;
+    exn_continuation = {
+      exn_handler = exn_continuation;
+      extra_args = [] };
     uses_mutable_variables = Env.has_mutables env;
   }
