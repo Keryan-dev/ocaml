@@ -25,15 +25,28 @@ module L = Lambda
 module C = Lambda_conversions
 
 module Env : sig
+  (* module Closure = Closure_conversion_aux.Env *)
+
   type t
 
   val create
      : current_unit_id:Ident.t
+    -> backend:(module Flambda_backend_intf.S)
+    -> return_continuation:Continuation.t
+    -> exn_continuation:Continuation.t
+    -> t
+
+  val create_from
+     : t
     -> return_continuation:Continuation.t
     -> exn_continuation:Continuation.t
     -> t
 
   val current_unit_id : t -> Ident.t
+
+  (* val backend : t -> (module Flambda_backend_intf.S) *)
+
+  (* val closure : t -> Closure.t *)
 
   val is_mutable : t -> Ident.t -> bool
 
@@ -83,6 +96,9 @@ module Env : sig
 
   val get_mutable_variable : t -> Ident.t -> Ident.t
 end = struct
+
+  module Closure = Closure_conversion_aux.Env
+
   type t = {
     current_unit_id : Ident.t;
     current_values_of_mutables_in_scope
@@ -91,11 +107,12 @@ end = struct
     try_stack : Continuation.t list;
     try_stack_at_handler : (Continuation.t list) Continuation.Map.t;
     static_exn_continuation : Continuation.t Numbers.Int.Map.t;
-    recursive_static_catches : Numbers.Int.Set.t
+    recursive_static_catches : Numbers.Int.Set.t;
+    closure : Closure.t
   }
 
-  let create ~current_unit_id  ~return_continuation
-        ~exn_continuation =
+  let create ~current_unit_id ~backend
+        ~return_continuation ~exn_continuation =
     let mutables_needed_by_continuations =
       Continuation.Map.of_list [
         return_continuation, Ident.Set.empty;
@@ -109,9 +126,30 @@ end = struct
       try_stack_at_handler = Continuation.Map.empty;
       static_exn_continuation = Numbers.Int.Map.empty;
       recursive_static_catches = Numbers.Int.Set.empty;
+      closure = Closure.empty ~backend
+    }
+
+  let create_from t ~return_continuation ~exn_continuation =
+    let mutables_needed_by_continuations =
+      Continuation.Map.of_list [
+        return_continuation, Ident.Set.empty;
+        exn_continuation, Ident.Set.empty;
+      ]
+    in
+    { t with
+      current_values_of_mutables_in_scope = Ident.Map.empty;
+      mutables_needed_by_continuations;
+      try_stack = [];
+      try_stack_at_handler = Continuation.Map.empty;
+      static_exn_continuation = Numbers.Int.Map.empty;
+      recursive_static_catches = Numbers.Int.Set.empty;
     }
 
   let current_unit_id t = t.current_unit_id
+
+  (* let closure t = t.closure *)
+
+  (* let backend t = Closure.backend t.closure *)
 
   let is_mutable t id =
     Ident.Map.mem id t.current_values_of_mutables_in_scope
@@ -267,13 +305,7 @@ end = struct
     | (id, _kind) -> id
 end
 
-module Acc : sig
-  type t
-  val empty : t
-end = struct
-  type t = unit
-  let empty = ()
-end
+module Acc = Closure_conversion_aux.Acc
 
 type primitive_transform_result =
   | Primitive of L.primitive * L.lambda list * L.scoped_location
@@ -1225,8 +1257,9 @@ and cps_function acc env ~stub
   let body_cont = Continuation.create ~sort:Return () in
   let body_exn_cont = Continuation.create () in
   let free_idents_of_body = Lambda.free_variables body in
-  let new_env = Env.create ~current_unit_id:(Env.current_unit_id env)
-    ~return_continuation:body_cont ~exn_continuation:body_exn_cont
+  let new_env =
+    Env.create_from env ~return_continuation:body_cont
+      ~exn_continuation:body_exn_cont
   in
   let acc, body = cps_tail acc new_env body body_cont body_exn_cont in
   acc, { kind = kind;
@@ -1415,14 +1448,14 @@ and cps_switch acc env (switch : L.lambda_switch) ~scrutinee
         (acc, switch) wrappers)
     k_exn
 
-let lambda_to_ilambda lam : Ilambda.program =
+let lambda_to_ilambda ~backend lam : Ilambda.program =
   let current_unit_id =
     Compilation_unit.get_persistent_ident
       (Compilation_unit.get_current_exn ())
   in
   let return_continuation = Continuation.create ~sort:Define_root_symbol () in
   let exn_continuation = Continuation.create () in
-  let env = Env.create ~current_unit_id
+  let env = Env.create ~current_unit_id ~backend
     ~return_continuation ~exn_continuation
   in
   let acc = Acc.empty in
