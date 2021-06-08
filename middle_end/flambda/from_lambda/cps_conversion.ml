@@ -25,7 +25,7 @@ module L = Lambda
 module C = Lambda_conversions
 
 module Env : sig
-  (* module Closure = Closure_conversion_aux.Env *)
+  (* module Cc_env = Closure_conversion_aux.Env *)
 
   type t
 
@@ -46,7 +46,7 @@ module Env : sig
 
   (* val backend : t -> (module Flambda_backend_intf.S) *)
 
-  (* val closure : t -> Closure.t *)
+  (* val closure_env : t -> Cc_env.t *)
 
   val is_mutable : t -> Ident.t -> bool
 
@@ -97,7 +97,7 @@ module Env : sig
   val get_mutable_variable : t -> Ident.t -> Ident.t
 end = struct
 
-  module Closure = Closure_conversion_aux.Env
+  module Cc_env = Closure_conversion_aux.Env
 
   type t = {
     current_unit_id : Ident.t;
@@ -108,7 +108,7 @@ end = struct
     try_stack_at_handler : (Continuation.t list) Continuation.Map.t;
     static_exn_continuation : Continuation.t Numbers.Int.Map.t;
     recursive_static_catches : Numbers.Int.Set.t;
-    closure : Closure.t
+    closure_env : Cc_env.t
   }
 
   let create ~current_unit_id ~backend
@@ -126,7 +126,7 @@ end = struct
       try_stack_at_handler = Continuation.Map.empty;
       static_exn_continuation = Numbers.Int.Map.empty;
       recursive_static_catches = Numbers.Int.Set.empty;
-      closure = Closure.empty ~backend
+      closure_env = Cc_env.empty ~backend
     }
 
   let create_from t ~return_continuation ~exn_continuation =
@@ -147,9 +147,9 @@ end = struct
 
   let current_unit_id t = t.current_unit_id
 
-  (* let closure t = t.closure *)
+  (* let closure_env t = t.closure_env *)
 
-  (* let backend t = Closure.backend t.closure *)
+  (* let backend t = Closure.backend t.closure_env *)
 
   let is_mutable t id =
     Ident.Map.mem id t.current_values_of_mutables_in_scope
