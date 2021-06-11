@@ -292,29 +292,45 @@ and print ppf (t : t) =
 let print_program ppf p =
   print ppf p.expr
 
-let recursive_functions func_decls =
-  let module SCC = Strongly_connected_components.Make (Ident) in
-  let fun_ids = Ident.Set.of_list (List.map fst func_decls) in
-  let directed_graph : Ident.Set.t Ident.Map.t =
-    List.fold_left (fun graph (fun_id, decl) ->
-        let free_fun_ids = Ident.Set.inter fun_ids decl.free_idents_of_body in
-        Ident.Map.add fun_id free_fun_ids graph)
-      Ident.Map.empty
-      func_decls
+let contains_functions (lam : Lambda.lambda) =
+  let rec contains_functions_tail (lam : Lambda.lambda) k =
+  match lam with
+    | Lvar _  | Lconst _ -> k ()
+    | Lfunction _ | Lletrec _ -> true
+    | Lassign (_, lam) | Levent (lam, _) | Lifused (_, lam)
+      -> contains_functions_tail lam k
+    | Lapply { ap_func; ap_args; _}
+      -> contains_functions_list (ap_func::ap_args) k
+    | Llet (_, _, _, lam1, lam2) | Lstaticcatch (lam1, _, lam2)
+    | Ltrywith (lam1, _, lam2) | Lsequence (lam1, lam2)
+    | Lwhile (lam1, lam2)
+      -> contains_functions_list [lam1; lam2] k
+    | Lifthenelse (lam1, lam2, lam3) | Lfor (_, lam1, lam2, _, lam3)
+      -> contains_functions_list [lam1; lam2; lam3] k
+    | Lprim (_, lams, _) | Lstaticraise (_, lams)
+      -> contains_functions_list lams k
+    | Lsend (_, lam1, lam2, lams, _)
+      -> contains_functions_list (lam1::lam2::lams) k
+    | Lswitch (lam1, { sw_consts; sw_blocks; sw_failaction; _ }, _) ->
+      let lams1 = List.map snd sw_consts in
+      let lams2 = List.map snd sw_blocks in
+      let lams = match sw_failaction with
+        | None -> lam1::lams1 @ lams2
+        | Some lam2 -> lam1::lam2::lams1 @ lams2
+      in
+      contains_functions_list lams k
+    | Lstringswitch (lam1, branches, failaction, _) ->
+      let lams = List.map snd branches in
+      let lams = match failaction with
+        | None -> lam1::lams
+        | Some lam2 -> lam1::lam2::lams
+      in
+      contains_functions_list lams k
+  and contains_functions_list lams k =
+    match lams with
+    | [] -> k ()
+    | lam::lams ->
+        contains_functions_tail lam
+          (fun () -> contains_functions_list lams k)
   in
-  let connected_components =
-    SCC.connected_components_sorted_from_roots_to_leaf directed_graph
-  in
-  Array.fold_left (fun rec_ids component ->
-      match component with
-      | SCC.No_loop _ -> rec_ids
-      | SCC.Has_loop elts -> List.fold_right Ident.Set.add elts rec_ids)
-    Ident.Set.empty connected_components
-
-let rec contains_closures t =
-  match t with
-  | Let (_, _, _, _, body) -> contains_closures body
-  | Let_rec _ -> true
-  | Let_cont { body; handler; _ } ->
-    contains_closures body || contains_closures handler
-  | Apply _ | Apply_cont _ | Switch _ -> false
+  contains_functions_tail lam (fun () -> false)
