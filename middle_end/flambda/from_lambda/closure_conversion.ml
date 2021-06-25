@@ -615,7 +615,7 @@ let close_switch acc env scrutinee (sw : IR.switch)
         let trap_action = close_trap_action_opt trap_action in
         let acc, args = find_simples acc env args in
         let acc, action =
-          Apply_cont_with_acc.create acc?trap_action cont ~args
+          Apply_cont_with_acc.create acc ?trap_action cont ~args
            ~dbg:Debuginfo.none
         in
         acc,

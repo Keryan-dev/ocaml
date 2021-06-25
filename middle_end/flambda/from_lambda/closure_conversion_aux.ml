@@ -491,6 +491,7 @@ module Let_cont_with_acc = struct
         acc
     in
     acc,
+    (* This function only uses continuations of [free_names_of_body] *)
     Let_cont.create_non_recursive cont handler ~body
       ~free_names_of_body:(Known free_conts)
 
