@@ -967,8 +967,18 @@ let close_functions acc external_env function_declarations =
   let function_decls = Function_declarations.create funs in
   let closure_elements =
     Ident.Map.fold (fun id var_within_closure map ->
-        let external_var = Simple.var (Env.find_var external_env id) in
-        Var_within_closure.Map.add var_within_closure external_var map)
+        let external_simple = find_simple_from_id external_env id in
+        let is_simple_var = Simple.pattern_match external_simple
+            ~const:(fun _ -> false)
+            ~name:(fun name ~coercion:_ ->
+                Name.pattern_match name
+                  ~var:(fun _ -> true)
+                  ~symbol:(fun _ -> true))
+        in
+        if is_simple_var
+        then
+          Var_within_closure.Map.add var_within_closure external_simple map
+        else map)
       var_within_closures_from_idents
       Var_within_closure.Map.empty
   in
