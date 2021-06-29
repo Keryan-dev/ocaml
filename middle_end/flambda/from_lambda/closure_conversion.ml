@@ -973,7 +973,7 @@ let close_functions acc external_env function_declarations =
             ~name:(fun name ~coercion:_ ->
                 Name.pattern_match name
                   ~var:(fun _ -> true)
-                  ~symbol:(fun _ -> true))
+                  ~symbol:(fun _ -> false))
         in
         if is_simple_var
         then
