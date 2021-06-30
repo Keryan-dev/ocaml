@@ -968,17 +968,10 @@ let close_functions acc external_env function_declarations =
   let closure_elements =
     Ident.Map.fold (fun id var_within_closure map ->
         let external_simple = find_simple_from_id external_env id in
-        let is_simple_var = Simple.pattern_match external_simple
-            ~const:(fun _ -> false)
-            ~name:(fun name ~coercion:_ ->
-                Name.pattern_match name
-                  ~var:(fun _ -> true)
-                  ~symbol:(fun _ -> false))
-        in
-        if is_simple_var
-        then
-          Var_within_closure.Map.add var_within_closure external_simple map
-        else map)
+        (* We're sure [external_simple] is a variable since
+           [var_within_closure_from_idents] has already filtered
+           constants and symbols out. *)
+        Var_within_closure.Map.add var_within_closure external_simple map)
       var_within_closures_from_idents
       Var_within_closure.Map.empty
   in
