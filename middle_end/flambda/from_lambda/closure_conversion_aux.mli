@@ -119,15 +119,16 @@ module Acc : sig
   val empty : t
 
   val declared_symbols : t -> (Symbol.t * Flambda.Static_const.t) list
-  val declared_static_sets_of_closures
-     : t -> (Symbol.t Closure_id.Lmap.t * Flambda.Set_of_closures.t) list
   val shareable_constants : t -> Symbol.t Flambda.Static_const.Map.t
-  val code : t -> Flambda.Code.t Code_id.Map.t
   val free_names_of_current_function : t -> Name_occurrences.t
   val free_continuations : t -> Name_occurrences.t
 
   val seen_a_function : t -> bool
   val with_seen_a_function : t -> bool -> t
+
+  val sorted_static_functions_bindings
+     : t
+    -> (Bound_symbols.Pattern.t * Flambda.Static_const.t) list list
 
   val add_declared_symbol
      : symbol:Symbol.t
@@ -150,6 +151,7 @@ module Acc : sig
   val add_code : code_id:Code_id.t -> code:Flambda.Code.t -> t -> t
 
   val add_symbol_to_free_names : symbol:Symbol.t -> t -> t
+  val add_code_id_to_free_names : code_id:Code_id.t -> t -> t
   val add_closure_var_to_free_names : closure_var:Var_within_closure.t -> t -> t
   val add_continuation_occurrence
     : cont:Continuation.t -> has_traps:bool -> t -> t

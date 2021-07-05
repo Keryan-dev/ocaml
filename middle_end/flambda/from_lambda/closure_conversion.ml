@@ -159,16 +159,26 @@ let close_const acc const =
   let named = Named.create_simple simple in
   acc, named, name
 
-let find_simple_from_id env id =
+let find_simple_from_id acc env id =
   match Env.find_simple_to_substitute_exn env id with
-  | simple -> simple
+  | simple ->
+    let acc =
+      Simple.pattern_match simple
+        ~const:(fun _ -> acc)
+        ~name:(fun name ~coercion:_ ->
+            Name.pattern_match name
+              ~var:(fun _ -> acc)
+              ~symbol:(fun symbol ->
+                Acc.add_symbol_to_free_names ~symbol acc))
+    in
+    acc, simple
   | exception Not_found ->
     match Env.find_var_exn env id with
     | exception Not_found ->
       Misc.fatal_errorf
         "find_simple_from_id: Cannot find [Ident] %a in environment"
         Ident.print id
-    | var -> Simple.var var
+    | var -> acc, Simple.var var
 
 (* CR mshinwell: Avoid the double lookup *)
 let find_simple acc env (simple : IR.simple) =
@@ -176,7 +186,7 @@ let find_simple acc env (simple : IR.simple) =
   | Const const ->
     let acc, simple, _ = close_const0 acc const in
     acc, simple
-  | Var id -> acc, find_simple_from_id env id
+  | Var id -> find_simple_from_id acc env id
 
 let find_simples acc env ids =
   List.fold_left_map
@@ -488,7 +498,7 @@ let close_named acc env ~let_bound_var (named : IR.named)
     let acc, named, _name = close_const acc cst in
     k acc (Some named)
   | Get_tag var ->
-    let named = find_simple_from_id env var in
+    let acc, named = find_simple_from_id acc env var in
     let prim : Lambda_to_flambda_primitives_helpers.expr_primitive =
       Unary (Box_number Untagged_immediate,
         Prim (Unary (Get_tag, Simple named)))
@@ -583,7 +593,7 @@ let close_apply acc env ({ kind; func; args; continuation; exn_continuation;
   let acc, exn_continuation =
     close_exn_continuation acc env exn_continuation
   in
-  let callee = find_simple_from_id env func in
+  let acc, callee = find_simple_from_id acc env func in
   let acc, args = find_simples acc env args in
   let apply =
     Apply.create ~callee
@@ -920,6 +930,7 @@ let close_one_function acc ~external_env ~by_closure_id decl
       ~cost_metrics
       ~inlining_arguments:Inlining_arguments.unknown
   in
+  let acc = Acc.add_code_id_to_free_names ~code_id acc in
   let acc = Acc.add_code ~code_id ~code acc in
   let acc = Acc.with_seen_a_function acc true in
   acc, Closure_id.Map.add my_closure_id fun_decl by_closure_id
@@ -1160,14 +1171,14 @@ let close_program ~backend ~module_ident ~module_block_size_in_words
       ~cost_metrics_of_handler
   in
   let acc, body =
-    List.fold_left (fun (acc, body) (symbols, set_of_closures) ->
+    List.fold_left (fun (acc, body) group ->
+        let pattern, consts = List.split group in
         let bound_symbols =
-          Bound_symbols.singleton
-            (Bound_symbols.Pattern.set_of_closures symbols)
+          Bound_symbols.create pattern
         in
         let defining_expr =
           Named.create_static_consts
-            (Static_const.Group.create [Set_of_closures set_of_closures])
+            (Static_const.Group.create consts)
         in
         Let_with_acc.create acc
           (Bindable_let_bound.symbols bound_symbols Syntactic)
@@ -1175,28 +1186,7 @@ let close_program ~backend ~module_ident ~module_block_size_in_words
         |> Expr_with_acc.create_let
       )
       (acc, body)
-      (Acc.declared_static_sets_of_closures acc)
-  in
-  let acc, body =
-    (* CR Keryan: The order of the bindings is important as blocks of code
-       might refer one another. There should be a topological sort here. *)
-    Code_id.Map.fold (fun code_id code (acc, body) ->
-      let bound_symbols =
-          Bound_symbols.singleton (Bound_symbols.Pattern.code code_id)
-        in
-        let static_const : Static_const.t =
-          Code code
-        in
-        let defining_expr =
-          Static_const.Group.create [static_const]
-          |> Named.create_static_consts
-        in
-        Let_with_acc.create acc
-          (Bindable_let_bound.symbols bound_symbols Syntactic)
-          defining_expr ~body ~free_names_of_body:Unknown
-        |> Expr_with_acc.create_let)
-      (Acc.code acc)
-      (acc, body)
+      (Acc.sorted_static_functions_bindings acc)
   in
   (* We must make sure there is always an outer [Let_symbol] binding so that
      lifted constants not in the scope of any other [Let_symbol] binding get

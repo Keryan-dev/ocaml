@@ -188,12 +188,125 @@ module Env = struct
 end
 
 module Acc = struct
+  module Static_functions = struct
+    module Intset = Numbers.Int.Set
+    module Intmap = Numbers.Int.Map
+
+    type symbols_of_closures_or_code =
+      | Symbols_of_closures of Symbol.t Closure_id.Lmap.t * Set_of_closures.t
+      | Code of Code_id.t * Flambda.Code.t
+
+    type t = {
+      declared_sets_of_closures_and_code
+      : symbols_of_closures_or_code Intmap.t;
+      symbols_map : Int.t Symbol.Map.t;
+      code_id_map : Int.t Code_id.Map.t;
+      decl_count : Int.t;
+    }
+
+    let empty = {
+      declared_sets_of_closures_and_code = Intmap.empty;
+      symbols_map = Symbol.Map.empty;
+      code_id_map = Code_id.Map.empty;
+      decl_count = 0;
+    }
+
+    let add_declared_set_of_closures symbols set_of_closures t =
+      let index = t.decl_count in
+      let symbols_map =
+        Closure_id.Lmap.fold (fun _ symbol symbols_map ->
+          Symbol.Map.add symbol index symbols_map)
+          symbols
+          t.symbols_map
+      in
+      let decl =
+        Symbols_of_closures (symbols, set_of_closures)
+      in
+      { t with
+        declared_sets_of_closures_and_code =
+          Intmap.add index decl t.declared_sets_of_closures_and_code;
+        symbols_map;
+        decl_count = t.decl_count + 1;
+      }
+
+    let add_code code_id code t =
+      let index = t.decl_count in
+      let code_id_map =
+        Code_id.Map.add code_id index t.code_id_map
+      in
+      let decl =
+        Code (code_id, code)
+      in
+    { t with
+      declared_sets_of_closures_and_code =
+        Intmap.add index decl t.declared_sets_of_closures_and_code;
+      code_id_map;
+      decl_count = t.decl_count + 1;
+    }
+
+    let find_code code_id t =
+      let index = Code_id.Map.find code_id t.code_id_map in
+      match Intmap.find index t.declared_sets_of_closures_and_code with
+      | Symbols_of_closures _ -> assert false
+      | Code (_,code) -> code
+
+    let get_sorted_declarations t =
+      let module SCC = Strongly_connected_components.Make(Numbers.Int) in
+      let dependence_graph =
+        Intmap.map (fun soc_or_cid ->
+            match soc_or_cid with
+            | Symbols_of_closures (_, set_of_closures) ->
+              let names = Set_of_closures.free_names set_of_closures in
+              Code_id.Set.fold (fun code_id deps ->
+                  let dep = Code_id.Map.find code_id t.code_id_map in
+                  Intset.add dep deps)
+                (Name_occurrences.code_ids_and_newer_version_of_code_ids names)
+                Intset.empty
+            | Code (_, code) ->
+              let names = Flambda.Code.free_names code in
+              let deps = Code_id.Set.fold (fun code_id deps ->
+                  let dep = Code_id.Map.find code_id t.code_id_map in
+                  Intset.add dep deps)
+                  (Name_occurrences.code_ids_and_newer_version_of_code_ids names)
+                  Intset.empty
+              in
+              Symbol.Set.fold (fun symbol deps ->
+                  try
+                    let dep = Symbol.Map.find symbol t.symbols_map in
+                    Intset.add dep deps
+                  with Not_found -> deps
+                )
+                (Name_occurrences.symbols names)
+                deps)
+          t.declared_sets_of_closures_and_code
+      in
+      let connected_components =
+        SCC.connected_components_sorted_from_roots_to_leaf
+          dependence_graph
+      in
+      let sorted_indexes = Array.fold_left (fun groups ->
+        function
+        | SCC.No_loop index -> [index]::groups
+        | SCC.Has_loop indexes -> indexes::groups)
+          [] connected_components
+      in
+      List.map (List.map (fun index ->
+          match Intmap.find index t.declared_sets_of_closures_and_code with
+          | Symbols_of_closures (symbols, set_of_closures) ->
+              Bound_symbols.Pattern.set_of_closures symbols,
+              Flambda.Static_const.Set_of_closures set_of_closures
+          | Code (code_id, code) ->
+              Bound_symbols.Pattern.code code_id,
+              Flambda.Static_const.Code code
+        ))
+        sorted_indexes
+
+  end
+
   type t = {
     declared_symbols : (Symbol.t * Flambda.Static_const.t) list;
-    declared_static_sets_of_closures
-      : (Symbol.t Closure_id.Lmap.t * Flambda.Set_of_closures.t) list;
     shareable_constants : Symbol.t Flambda.Static_const.Map.t;
-    code : Flambda.Code.t Code_id.Map.t;
+    static_functions : Static_functions.t;
     free_names_of_current_function : Name_occurrences.t;
     free_continuations : Name_occurrences.t;
     cost_metrics : Flambda.Cost_metrics.t;
@@ -211,9 +324,8 @@ module Acc = struct
 
   let empty = {
     declared_symbols = [];
-    declared_static_sets_of_closures = [];
     shareable_constants = Flambda.Static_const.Map.empty;
-    code = Code_id.Map.empty;
+    static_functions = Static_functions.empty;
     free_names_of_current_function = Name_occurrences.empty;
     free_continuations = Name_occurrences.empty;
     cost_metrics = Flambda.Cost_metrics.zero;
@@ -221,20 +333,17 @@ module Acc = struct
   }
 
   let declared_symbols t = t.declared_symbols
-  let declared_static_sets_of_closures t = t.declared_static_sets_of_closures
   let shareable_constants t = t.shareable_constants
-  let code t = t.code
   let free_names_of_current_function t = t.free_names_of_current_function
   let free_continuations t = t.free_continuations
+
+  let sorted_static_functions_bindings t =
+    Static_functions.get_sorted_declarations t.static_functions
+    |> List.rev
 
   let add_declared_symbol ~symbol ~constant t =
     let declared_symbols = (symbol, constant) :: t.declared_symbols in
     { t with declared_symbols; }
-
-  let add_declared_set_of_closures ~symbols ~set_of_closures t =
-    { t with
-      declared_static_sets_of_closures =
-        (symbols, set_of_closures) :: t.declared_static_sets_of_closures; }
 
   let add_shareable_constant ~symbol ~constant t =
     let shareable_constants =
@@ -242,8 +351,18 @@ module Acc = struct
     in
     { t with shareable_constants; }
 
+  let add_declared_set_of_closures ~symbols ~set_of_closures t =
+    { t with
+      static_functions =
+        Static_functions.add_declared_set_of_closures symbols set_of_closures
+          t.static_functions
+    }
+
   let add_code ~code_id ~code t =
-    { t with code = Code_id.Map.add code_id code t.code; }
+    { t with
+      static_functions =
+        Static_functions.add_code code_id code t.static_functions;
+    }
 
   let add_symbol_to_free_names ~symbol t =
     { t with
@@ -251,6 +370,14 @@ module Acc = struct
         Name_occurrences.add_symbol t.free_names_of_current_function
           symbol Name_mode.normal;
     }
+
+  let add_code_id_to_free_names ~code_id t =
+    { t with
+      free_names_of_current_function =
+        Name_occurrences.add_code_id t.free_names_of_current_function
+          code_id Name_mode.normal;
+    }
+
   let add_closure_var_to_free_names ~closure_var t =
     { t with
       free_names_of_current_function =
@@ -264,6 +391,9 @@ module Acc = struct
         Name_occurrences.add_continuation t.free_continuations
           cont ~has_traps;
     }
+
+  let find_code code_id t =
+    Static_functions.find_code code_id t.static_functions
 
   let with_free_names free_names t =
     { t with free_names_of_current_function = free_names; }
@@ -459,10 +589,9 @@ module Let_with_acc = struct
         Code_size.simple simple |> Cost_metrics.from_size
       | Named.Static_consts _consts -> Cost_metrics.zero
       | Named.Set_of_closures set_of_closures ->
-        let code_mapping = Acc.code acc in
         Cost_metrics.set_of_closures
           ~find_code_characteristics:(fun code_id ->
-            let code = Code_id.Map.find code_id code_mapping in
+            let code = Acc.find_code code_id acc in
             {
               cost_metrics = Code.cost_metrics code;
               params_arity = List.length (Code.params_arity code)
