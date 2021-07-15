@@ -85,6 +85,11 @@ module IR = struct
 end
 
 module Env = struct
+  type value_approximation =
+    | Value_unknown
+    | Closure_approximation of Code_id.t
+    | Block_approximation of value_approximation array
+
   type t = {
     variables : Variable.t Ident.Map.t;
     globals : Symbol.t Numeric_types.Int.Map.t;
@@ -92,6 +97,7 @@ module Env = struct
     backend : (module Flambda_backend_intf.S);
     current_unit_id : Ident.t;
     symbol_for_global' : (Ident.t -> Symbol.t);
+    value_approximations : value_approximation Name.Map.t;
   }
 
   let backend t = t.backend
@@ -107,11 +113,12 @@ module Env = struct
       backend;
       current_unit_id = Compilation_unit.get_persistent_ident compilation_unit;
       symbol_for_global' = Backend.symbol_for_global';
+      value_approximations = Name.Map.empty;
     }
 
   let clear_local_bindings
         { variables = _; globals; simples_to_substitute; backend;
-          current_unit_id; symbol_for_global'; } =
+          current_unit_id; symbol_for_global'; value_approximations } =
     let simples_to_substitute =
       Ident.Map.filter (fun _ simple -> not (Simple.is_var simple))
         simples_to_substitute
@@ -122,6 +129,7 @@ module Env = struct
       backend;
       current_unit_id;
       symbol_for_global';
+      value_approximations;
     }
 
   let add_var t id var = { t with variables = Ident.Map.add id var t.variables }
@@ -189,15 +197,47 @@ module Env = struct
 
   let find_simple_to_substitute_exn t id =
     Ident.Map.find id t.simples_to_substitute
+
+  let add_value_approximation t name approx =
+    if approx = Value_unknown then t
+    else
+      { t with value_approximations =
+        Name.Map.add name approx t.value_approximations;
+      }
+
+  let add_closure_approximation t name code_id =
+    add_value_approximation t name (Closure_approximation code_id)
+
+  let add_block_approximation t name approxs =
+    if Array.for_all ((=) Value_unknown) approxs then t
+    else
+      add_value_approximation t name (Block_approximation approxs)
+
+  let find_value_approximation t simple =
+    Simple.pattern_match simple
+      ~const:(fun _ -> Value_unknown)
+      ~name:(fun name ~coercion:_ ->
+          try Name.Map.find name t.value_approximations with
+          | Not_found -> Value_unknown)
+
+  let add_approximation_alias t name alias =
+    match find_value_approximation t (Simple.name name) with
+    | Value_unknown -> t
+    | approx -> add_value_approximation t alias approx
 end
 
 module Acc = struct
+  type continuation_application =
+    | Trackable_arguments of Env.value_approximation list
+    | Untrackable
+
   type t = {
     declared_symbols : (Symbol.t * Flambda.Static_const.t) list;
     shareable_constants : Symbol.t Flambda.Static_const.Map.t;
     code : Flambda.Code.t Code_id.Map.t;
     free_names_of_current_function : Name_occurrences.t;
     free_continuations : Name_occurrences.t;
+    continuation_applications : continuation_application Continuation.Map.t;
     cost_metrics : Flambda.Cost_metrics.t;
     seen_a_function : bool;
   }
@@ -217,6 +257,7 @@ module Acc = struct
     code = Code_id.Map.empty;
     free_names_of_current_function = Name_occurrences.empty;
     free_continuations = Name_occurrences.empty;
+    continuation_applications = Continuation.Map.empty;
     cost_metrics = Flambda.Cost_metrics.zero;
     seen_a_function = false;
   }
@@ -253,12 +294,37 @@ module Acc = struct
           closure_var Name_mode.normal;
     }
 
-  let add_continuation_occurrence ~cont ~has_traps t =
+  let add_continuation_occurrence ~cont ~has_traps ?args_approx t =
+    let continuation_application =
+      match args_approx with
+      | None -> Untrackable
+      | Some args ->
+        if Continuation.Map.mem cont t.continuation_applications
+        then Untrackable
+        else Trackable_arguments args
+    in
     { t with
       free_continuations =
         Name_occurrences.add_continuation t.free_continuations
           cont ~has_traps;
+      continuation_applications =
+        Continuation.Map.add cont continuation_application
+          t.continuation_applications;
     }
+
+  let continuation_out_of_scope ~cont t =
+    { t with
+      free_continuations =
+        Name_occurrences.remove_continuation t.free_continuations cont;
+      continuation_applications =
+        Continuation.Map.remove cont t.continuation_applications;
+    }
+
+  let continuation_known_arguments ~cont t =
+    match Continuation.Map.find cont t.continuation_applications with
+    | exception Not_found
+    | Untrackable -> None
+    | Trackable_arguments args -> Some args
 
   let with_free_names free_names t =
     { t with free_names_of_current_function = free_names; }
@@ -430,18 +496,19 @@ module Expr_with_acc = struct
 end
 
 module Apply_cont_with_acc = struct
-  let create acc ?trap_action cont ~args ~dbg =
+  let create acc ?trap_action ?args_approx cont ~args ~dbg =
     let acc =
       Acc.add_continuation_occurrence ~cont
         ~has_traps:(match trap_action with
             | None -> false
             | _ -> true)
+        ?args_approx
         acc
     in
     acc, Apply_cont.create ?trap_action cont ~args ~dbg
 
   let goto acc cont =
-    create acc cont ~args:[] ~dbg:(Debuginfo.none)
+    create acc cont ~args:[] ?args_approx:None ~dbg:(Debuginfo.none)
 end
 
 module Let_with_acc = struct
@@ -487,17 +554,17 @@ end
 module Let_cont_with_acc = struct
   let create_non_recursive acc cont handler
         ~body ~cost_metrics_of_handler =
-    let free_conts = Acc.free_continuations acc in
+    let _free_conts = Acc.free_continuations acc in
     let acc =
       Acc.increment_metrics
         (Cost_metrics.increase_due_to_let_cont_non_recursive
            ~cost_metrics_of_handler)
         acc
     in
-    acc,
+    Acc.continuation_out_of_scope ~cont acc,
     (* This function only uses continuations of [free_names_of_body] *)
     Let_cont.create_non_recursive cont handler ~body
-      ~free_names_of_body:(Known free_conts)
+      ~free_names_of_body:Unknown(* (Known free_conts) *)
 
   let create_recursive acc handlers ~body ~cost_metrics_of_handlers =
     let acc =

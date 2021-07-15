@@ -171,6 +171,192 @@ let find_simples acc env ids =
     acc
     ids
 
+module Inlining = struct
+  type inlinable_result =
+    | Not_inlinable
+    | Inlinable of Code.t
+
+  let inlinable acc env name =
+    match Env.find_value_approximation env name with
+    | Value_unknown
+    | Block_approximation _ -> Not_inlinable
+    | Closure_approximation code_id ->
+      let code = Code_id.Map.find code_id (Acc.code acc) in
+      let code_size =
+        Code.cost_metrics code
+        |> Cost_metrics.size |> Code_size.to_int
+      in
+      let threshold =
+        match Code.inline code with
+        | Default_inline ->
+          let inline_threshold =
+            Clflags.Float_arg_helper.get ~key:0 !Clflags.inline_threshold
+          in
+          (* CR keryan: should probably tweak this value *)
+          let magic_scale_constant = 3. in
+          int_of_float (inline_threshold *. magic_scale_constant)
+        | Always_inline | Hint_inline -> max_int
+        | Never_inline -> min_int
+        | Unroll _ -> assert false
+      in
+      if code_size > threshold
+      then Not_inlinable
+      else Inlinable code
+
+  (* CR keryan: the remaining functions of the submodule are taken
+     from [Inlining_transforms] and adapted to local [Acc].
+     Some refactoring (functoring ?) is in order here. *)
+  let make_inlined_body acc ~callee ~params ~args ~my_closure ~body
+        ~exn_continuation ~return_continuation ~apply_exn_continuation
+        ~apply_return_continuation =
+    let perm = Renaming.empty in
+    let acc, perm =
+      match (apply_return_continuation : Apply.Result_continuation.t) with
+      | Return k ->
+        Acc.add_continuation_occurrence ~cont:return_continuation
+          ~has_traps:false acc,
+        Renaming.add_continuation perm return_continuation k
+      | Never_returns -> acc, perm
+    in
+    let perm =
+      Renaming.add_continuation perm
+        (Exn_continuation.exn_handler exn_continuation)
+        apply_exn_continuation
+    in
+    let acc =
+      Acc.add_continuation_occurrence
+        ~cont:(Exn_continuation.exn_handler exn_continuation)
+        ~has_traps:true acc
+    in
+    let params = List.map Kinded_parameter.var params in
+    let acc, expr =
+      List.fold_left2 (fun (acc, body) param arg ->
+          Let_with_acc.create acc
+            (Bindable_let_bound.singleton (VB.create param Name_mode.normal))
+            (Named.create_simple arg) ~body ~free_names_of_body:Unknown
+          |> Expr_with_acc.create_let)
+        (acc, body) (my_closure::params) (callee::args)
+    in
+    acc, Expr.apply_renaming expr perm
+
+  let wrap_inlined_body_for_exn_support acc ~extra_args ~apply_exn_continuation
+        ~apply_return_continuation ~result_arity ~make_inlined_body =
+    let wrapper = Continuation.create () in
+    let acc, body_with_pop =
+      match (apply_return_continuation : Apply.Result_continuation.t) with
+      | Never_returns ->
+        make_inlined_body acc ~apply_exn_continuation:wrapper
+          ~apply_return_continuation
+      | Return apply_return_continuation ->
+        let pop_wrapper_cont = Continuation.create () in
+        let cost_metrics_of_handler, acc, pop_wrapper_handler =
+          let kinded_params =
+            List.map (fun k -> Variable.create "wrapper_return", k) result_arity
+          in
+          let trap_action =
+            Trap_action.Pop { exn_handler = wrapper; raise_kind = None; }
+          in
+          let args = List.map (fun (v, _) -> Simple.var v) kinded_params in
+          let acc, handler =
+            let acc, apply_cont =
+              Apply_cont_with_acc.create acc ~trap_action apply_return_continuation
+              ~args ~dbg:Debuginfo.none
+            in
+            Expr_with_acc.create_apply_cont acc apply_cont
+          in
+          Acc.measure_cost_metrics acc ~f:(fun acc ->
+              Continuation_handler_with_acc.create acc
+                (Kinded_parameter.List.create kinded_params)
+                ~handler ~free_names_of_handler:Unknown ~is_exn_handler:false)
+        in
+        let new_apply_return_continuation =
+          Apply.Result_continuation.Return pop_wrapper_cont
+        in
+        let acc, body =
+          make_inlined_body acc ~apply_exn_continuation:wrapper
+            ~apply_return_continuation:new_apply_return_continuation
+        in
+        Let_cont_with_acc.create_non_recursive acc pop_wrapper_cont
+          pop_wrapper_handler ~body ~cost_metrics_of_handler
+    in
+    let cost_metrics_of_handler, acc, wrapper_handler =
+      let param = Variable.create "exn" in
+      let kinded_params =
+        [Kinded_parameter.create
+           param K.With_subkind.any_value]
+      in
+      let exn_handler = Exn_continuation.exn_handler apply_exn_continuation in
+      let trap_action = Trap_action.Pop { exn_handler; raise_kind = None; } in
+      let acc, handler =
+        (* Backtrace building functions expect compiler-generated raises not to
+           have any debug info *)
+        let acc, apply_cont =
+          Apply_cont_with_acc.create acc ~trap_action
+            (Exn_continuation.exn_handler apply_exn_continuation)
+            ~args:((Simple.var param) :: (List.map fst extra_args))
+            ~dbg:Debuginfo.none
+        in
+        Expr_with_acc.create_apply_cont acc apply_cont
+      in
+      Acc.measure_cost_metrics acc ~f:(fun acc ->
+          Continuation_handler_with_acc.create acc kinded_params ~handler
+            ~free_names_of_handler:Unknown ~is_exn_handler:true)
+    in
+    let acc, body_with_push =
+      (* Wrap the body between push and pop of the wrapper handler *)
+      let push_wrapper_cont = Continuation.create () in
+      let handler = body_with_pop in
+      let cost_metrics_of_handler, acc, push_wrapper_handler =
+        Acc.measure_cost_metrics acc ~f:(fun acc ->
+            Continuation_handler_with_acc.create acc [] ~handler
+              ~free_names_of_handler:Unknown ~is_exn_handler:false)
+      in
+      let trap_action = Trap_action.Push { exn_handler = wrapper; } in
+      let acc, body =
+        let acc, apply_cont =
+          Apply_cont_with_acc.create acc ~trap_action push_wrapper_cont ~args:[]
+            ~dbg:Debuginfo.none
+        in
+        Expr_with_acc.create_apply_cont acc apply_cont
+      in
+      Let_cont_with_acc.create_non_recursive acc push_wrapper_cont
+        push_wrapper_handler ~body ~cost_metrics_of_handler
+    in
+    Let_cont_with_acc.create_non_recursive acc wrapper wrapper_handler
+      ~body:body_with_push ~cost_metrics_of_handler
+
+  let inline acc ~apply ~code =
+    let callee = Apply.callee apply in
+    let args = Apply.args apply in
+    let apply_return_continuation = Apply.continuation apply in
+    let apply_exn_continuation = Apply.exn_continuation apply in
+    let params_and_body =
+      Code.params_and_body_must_be_present code
+        ~error_context:"Inlining in [Closure_conversion]"
+    in
+    Function_params_and_body.pattern_match params_and_body
+      ~f:(fun ~return_continuation exn_continuation params ~body
+           ~my_closure ~is_my_closure_used:_ ~my_depth:_ ->
+           if List.length args <> List.length params
+           then
+             Expr_with_acc.create_apply acc apply
+           else
+             let make_inlined_body =
+               make_inlined_body ~callee ~params ~args ~my_closure ~body
+                 ~exn_continuation ~return_continuation
+             in
+             (* assert ((Exn_continuation.extra_args exn_continuation) = []); *)
+             match Exn_continuation.extra_args apply_exn_continuation with
+             | [] ->
+               make_inlined_body acc ~apply_exn_continuation:
+                 (Exn_continuation.exn_handler apply_exn_continuation)
+                 ~apply_return_continuation
+             | extra_args ->
+               wrap_inlined_body_for_exn_support acc ~extra_args
+                 ~apply_exn_continuation ~apply_return_continuation
+                 ~result_arity:(Code.result_arity code) ~make_inlined_body)
+end
+
 let close_c_call acc ~let_bound_var (prim : Primitive.description)
       ~(args : Simple.t list) exn_continuation dbg
       (k : Acc.t -> Named.t option -> Acc.t * Expr_with_acc.t)
@@ -498,16 +684,40 @@ let close_let acc env id user_visible defining_expr
     | Some (Simple simple) ->
       let body_env = Env.add_simple_to_substitute env id simple in
       body acc body_env
-    | Some _ | None ->
+    | None ->  body acc body_env
+    | Some defining_expr ->
+      let body_env =
+        match defining_expr with
+        | Prim (Variadic (Make_block _, fields), _) ->
+          let approxs =
+            List.map (Env.find_value_approximation body_env) fields
+            |> Array.of_list
+          in
+          Env.add_block_approximation body_env (Name.var var) approxs
+        | Prim (Binary (Block_load _, block, field), _) ->
+          begin match Env.find_value_approximation body_env block with
+          | Value_unknown -> body_env
+          | Closure_approximation _ -> assert false
+          | Block_approximation approx ->
+            let approx : Env.value_approximation =
+              Simple.pattern_match field
+                ~const:(fun const ->
+                  match Reg_width_things.Const.descr const with
+                  | Tagged_immediate i ->
+                    approx.(Targetint_31_63.(Imm.to_int (to_targetint i)))
+                  | _ -> Env.Value_unknown)
+                ~name:(fun _ ~coercion:_ -> Env.Value_unknown)
+            in
+            Env.add_value_approximation body_env (Name.var var) approx
+          end
+        | _ -> body_env
+      in
       (* CR pchambart: Not tail ! *)
       let acc, body = body acc body_env in
-      match defining_expr with
-      | None -> acc, body
-      | Some defining_expr ->
-        let var = VB.create var Name_mode.normal in
-        Let_with_acc.create acc (Bindable_let_bound.singleton var) defining_expr
-          ~body ~free_names_of_body:Unknown
-        |> Expr_with_acc.create_let
+      let var = VB.create var Name_mode.normal in
+      Let_with_acc.create acc (Bindable_let_bound.singleton var) defining_expr
+        ~body ~free_names_of_body:Unknown
+      |> Expr_with_acc.create_let
   in
   close_named acc env ~let_bound_var:var defining_expr cont
 
@@ -530,6 +740,15 @@ let close_let_cont acc env ~name ~is_exn_handler ~params
       (List.map (fun (param, user_visible, _kind) -> param, user_visible)
          params)
   in
+  let acc, body = body acc env in
+  let handler_env =
+    match Acc.continuation_known_arguments ~cont:name acc with
+    | None -> handler_env
+    | Some args ->
+      List.fold_left2 (fun env arg_approx param ->
+          Env.add_value_approximation env (Name.var param) arg_approx)
+        handler_env args params
+  in
   let params =
     List.map2 (fun param (_, _, kind) ->
         Kinded_parameter.create param (LC.value_kind kind))
@@ -545,7 +764,6 @@ let close_let_cont acc env ~name ~is_exn_handler ~params
       ~free_names_of_handler:Unknown
       ~is_exn_handler
   in
-  let acc, body = body acc env in
   begin match recursive with
   | Nonrecursive ->
     Let_cont_with_acc.create_non_recursive acc name handler ~body
@@ -567,29 +785,35 @@ let close_apply acc env ({ kind; func; args; continuation; exn_continuation;
       acc,
       Call_kind.method_call (LC.method_kind kind) ~obj
   in
-  let acc, exn_continuation =
+  let acc, apply_exn_continuation =
     close_exn_continuation acc env exn_continuation
   in
   let callee = find_simple_from_id env func in
   let acc, args = find_simples acc env args in
   let apply =
-    Apply.create ~callee
-      ~continuation:(Return continuation)
-      exn_continuation
-      ~args
-      ~call_kind
-      (Debuginfo.from_location loc)
-      ~inline:(LC.inline_attribute inlined)
-      ~inlining_state:(Inlining_state.default)
-  in
-  Expr_with_acc.create_apply acc apply
+      Apply.create ~callee
+        ~continuation:(Return continuation)
+        apply_exn_continuation
+        ~args
+        ~call_kind
+        (Debuginfo.from_location loc)
+        ~inline:(LC.inline_attribute inlined)
+        ~inlining_state:(Inlining_state.default)
+    in
+  match Inlining.inlinable acc env callee with
+  | Not_inlinable ->
+    Expr_with_acc.create_apply acc apply
+  | Inlinable code ->
+    Inlining.inline acc ~apply ~code
 
 let close_apply_cont acc env cont trap_action args
   : Acc.t * Expr_with_acc.t =
   let acc, args = find_simples acc env args in
   let trap_action = close_trap_action_opt trap_action in
+  let args_approx = List.map (Env.find_value_approximation env) args in
   let acc, apply_cont =
-    Apply_cont_with_acc.create acc ?trap_action cont ~args ~dbg:Debuginfo.none
+    Apply_cont_with_acc.create acc ?trap_action ~args_approx
+      cont ~args ~dbg:Debuginfo.none
   in
   Expr_with_acc.create_apply_cont acc apply_cont
 
@@ -769,8 +993,18 @@ let close_one_function acc ~external_env ~by_closure_id decl
   in
   let closure_env_without_parameters =
     let empty_env = Env.clear_local_bindings external_env in
-    Env.add_var_map (Env.add_var_map empty_env var_within_closures_for_idents)
-      vars_for_project_closure
+    let env_with_vars =
+      Ident.Map.fold (fun id var env ->
+          Simple.pattern_match (find_simple_from_id external_env id)
+            ~const:(fun _ -> assert false)
+            ~name:(fun name ~coercion:_ ->
+              Env.add_approximation_alias (Env.add_var env id var)
+                name (Name.var var))
+        )
+        var_within_closures_for_idents
+        empty_env
+    in
+    Env.add_var_map env_with_vars vars_for_project_closure
   in
   let closure_env =
     List.fold_right (fun (id, _) env ->
@@ -1026,6 +1260,18 @@ let close_let_rec acc env ~function_declarations
       (Function_declarations.funs_in_order (
           Set_of_closures.function_decls set_of_closures)
         |> Closure_id.Lmap.bindings)
+  in
+  let approximations =
+    Function_declarations.funs_in_order
+      (Set_of_closures.function_decls set_of_closures)
+    |> Closure_id.Lmap.data
+    |> List.map Function_declaration.code_id
+  in
+  let env =
+    List.fold_left2 (fun env var approx ->
+      Env.add_closure_approximation env
+        (Name.var (VB.var var)) approx)
+      env closure_vars approximations
   in
   let acc, body = body acc env in
   let named = Named.create_set_of_closures set_of_closures in
