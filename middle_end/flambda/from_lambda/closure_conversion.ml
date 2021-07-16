@@ -1211,6 +1211,6 @@ let close_program ~backend ~module_ident ~module_block_size_in_words
       (acc, body)
       (Acc.declared_symbols acc)
   in
-  ignore (acc : Acc.t);
   Flambda_unit.create ~return_continuation:return_cont ~exn_continuation
-    ~body ~module_symbol ~used_closure_vars:Unknown
+    ~body ~module_symbol ~used_closure_vars:Unknown,
+  Exported_code.add_code (Acc.code acc) Exported_code.empty
