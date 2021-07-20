@@ -988,6 +988,7 @@ let close_functions acc external_env function_declarations =
   in
   let can_be_lifted =
     Ident.Map.is_empty var_within_closures_from_idents
+    && !Clflags.Flambda.Expert.fallback_inlining_heuristic
   in
   let func_decl_list = Function_decls.to_list function_declarations in
   let closure_ids_from_idents =
