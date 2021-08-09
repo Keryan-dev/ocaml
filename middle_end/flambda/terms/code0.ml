@@ -26,6 +26,8 @@ module Make (Function_params_and_body : sig
 
   val apply_renaming : t -> Renaming.t -> t
 
+  val free_names_of_body : t -> Name_occurrences.t Or_unknown.t
+
   val print : Format.formatter -> t -> unit
 
   val print_with_cache
@@ -95,22 +97,24 @@ end) = struct
     let free_names_of_params_and_body =
       match params_and_body with
       | Deleted -> Name_occurrences.empty
-      | Present (params_and_body, free_names) ->
-        if not (Name_occurrences.no_continuations free_names
-                && Name_occurrences.no_variables free_names)
+      | Present (params_and_body, free_names_of_params_and_body) ->
+        if not (Name_occurrences.no_continuations
+                  free_names_of_params_and_body
+                && Name_occurrences.no_variables
+                     free_names_of_params_and_body)
         then begin
-          Misc.fatal_errorf "Incorrect free names:@ %a@ for creation of code:@ \
-              %a@ =@ %a"
-            Name_occurrences.print free_names
+          Misc.fatal_errorf "Incorrect free names:@ %a@ for creation \
+                             of code:@ %a@ =@ %a"
+            Name_occurrences.print free_names_of_params_and_body
             Code_id.print code_id
             Function_params_and_body.print params_and_body
         end;
-        free_names
+        free_names_of_params_and_body
     in
     let params_and_body : _ Or_deleted.t =
       match params_and_body with
       | Deleted -> Deleted
-      | Present (params_and_body, _free_names) -> Present params_and_body
+      | Present (params_and_body, _) -> Present params_and_body
     in
     params_and_body, free_names_of_params_and_body
 
@@ -161,7 +165,9 @@ end) = struct
     let params_and_body, free_names_of_params_and_body =
       check_params_and_body t.code_id params_and_body
     in
-    { t with params_and_body; cost_metrics; free_names_of_params_and_body; }
+    { t with
+      params_and_body; cost_metrics;
+      free_names_of_params_and_body; }
 
   let with_newer_version_of newer_version_of t = { t with newer_version_of }
 
@@ -280,6 +286,13 @@ end) = struct
           Name_occurrences.empty older Name_mode.normal
     in
     Name_occurrences.union from_newer_version_of t.free_names_of_params_and_body
+
+  let free_names_of_body t =
+    let params_and_body =
+      params_and_body_must_be_present ~error_context:"Accessing free_names_of_body"
+        t
+    in
+    Function_params_and_body.free_names_of_body params_and_body
 
   let apply_renaming
         ({ code_id; params_and_body; newer_version_of; params_arity = _;

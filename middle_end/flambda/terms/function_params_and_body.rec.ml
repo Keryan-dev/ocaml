@@ -32,6 +32,7 @@ type t = {
   dbg : Debuginfo.t;
   params_arity : Flambda_arity.t;
   is_my_closure_used : bool Or_unknown.t;
+  free_names_of_body : Name_occurrences.t Or_unknown.t;
 }
 
 let invariant _env _t = ()
@@ -40,7 +41,7 @@ let create ~return_continuation exn_continuation params ~dbg ~body
       ~free_names_of_body ~my_closure ~my_depth =
   let is_my_closure_used =
     Or_unknown.map free_names_of_body ~f:(fun free_names_of_body ->
-      Name_occurrences.mem_var free_names_of_body my_closure)
+        Name_occurrences.mem_var free_names_of_body my_closure)
   in
   let my_closure =
     Kinded_parameter.create my_closure (K.With_subkind.create K.value Anything)
@@ -52,6 +53,7 @@ let create ~return_continuation exn_continuation params ~dbg ~body
   { abst; dbg;
     params_arity = Kinded_parameter.List.arity params;
     is_my_closure_used;
+    free_names_of_body;
   }
 
 let extract_my_closure params_and_my_closure =
@@ -108,16 +110,28 @@ let print ppf t =
 let params_arity t = t.params_arity
 
 let apply_renaming
-      ({ abst; dbg; params_arity; is_my_closure_used; } as t) perm =
+      ({ abst; dbg; params_arity; is_my_closure_used; free_names_of_body } as t) perm =
   let abst' = A.apply_renaming abst perm in
+  let free_names_of_body' =
+    Or_unknown.map free_names_of_body
+      ~f:(fun free_names_of_body ->
+          Name_occurrences.apply_renaming free_names_of_body perm)
+  in
   if abst == abst' then t
-  else { abst = abst'; dbg; params_arity; is_my_closure_used; }
+  else { abst = abst'; dbg; params_arity; is_my_closure_used;
+         free_names_of_body = free_names_of_body' }
 
-let free_names { abst; params_arity = _; dbg = _; is_my_closure_used = _; } =
+let free_names { abst; params_arity = _; dbg = _; is_my_closure_used = _;
+                 free_names_of_body = _;} =
   A.free_names abst
+
+let free_names_of_body { abst = _ ; params_arity = _; dbg = _;
+      is_my_closure_used = _; free_names_of_body } =
+  free_names_of_body
 
 let debuginfo { dbg; _ } = dbg
 
 let all_ids_for_export
-      { abst; params_arity = _; dbg = _; is_my_closure_used = _; } =
+      { abst; params_arity = _; dbg = _; is_my_closure_used = _;
+        free_names_of_body = _;} =
   A.all_ids_for_export abst

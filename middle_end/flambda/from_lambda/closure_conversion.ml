@@ -896,16 +896,16 @@ let close_one_function acc ~external_env ~by_closure_id decl
     then Never_inline
     else LC.inline_attribute (Function_decl.inline decl)
   in
-  let acc =
-    Acc.remove_continuation_from_free_names return_continuation acc
-    |> Acc.remove_continuation_from_free_names
-         (Exn_continuation.exn_handler exn_continuation)
-  in
   let params_and_body =
     Function_params_and_body.create
       ~return_continuation
       exn_continuation params ~dbg ~body ~my_closure ~my_depth
-      ~free_names_of_body:Unknown
+      ~free_names_of_body:(Known (Acc.free_names acc))
+  in
+  let acc =
+    Acc.remove_continuation_from_free_names return_continuation acc
+    |> Acc.remove_continuation_from_free_names
+         (Exn_continuation.exn_handler exn_continuation)
   in
   let params_arity = Kinded_parameter.List.arity_with_subkinds params in
   let is_tupled =
