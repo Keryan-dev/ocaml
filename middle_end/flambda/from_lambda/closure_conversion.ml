@@ -163,7 +163,13 @@ let find_simple acc env (simple : IR.simple) =
   | Const const ->
     let acc, simple, _ = close_const0 acc const in
     acc, simple
-  | Var id -> acc, find_simple_from_id env id
+  | Var id ->
+    let simple = find_simple_from_id env id in
+    Simple.pattern_match simple
+      ~const:(fun _ -> acc, simple)
+      ~name:(fun name ~coercion:_ ->
+        Acc.add_name_to_free_names ~name acc,
+        Simple.name name)
 
 let find_simples acc env ids =
   List.fold_left_map
@@ -246,7 +252,6 @@ let close_c_call acc ~let_bound_var (prim : Primitive.description)
             in
             Let_with_acc.create acc bindable (Named.create_prim prim dbg)
               ~body:return_result_expr
-              ~free_names_of_body:(Known (Apply_cont.free_names return_result))
             |> Expr_with_acc.create_let
           | [] | _::_ ->
             Misc.fatal_errorf "Expected one arg for %s" prim.prim_native_name
@@ -298,7 +303,6 @@ let close_c_call acc ~let_bound_var (prim : Primitive.description)
                (Bindable_let_bound.singleton unboxed_arg')
                named
                ~body
-               ~free_names_of_body:Unknown
              |> Expr_with_acc.create_let))
       call
       args
@@ -317,7 +321,6 @@ let close_c_call acc ~let_bound_var (prim : Primitive.description)
       Let_with_acc.create acc (Bindable_let_bound.singleton let_bound_var')
         named
         ~body
-        ~free_names_of_body:Unknown
       |> Expr_with_acc.create_let
     in
     acc, expr, handler_param
@@ -502,11 +505,15 @@ let close_let acc env id user_visible defining_expr
       (* CR pchambart: Not tail ! *)
       let acc, body = body acc body_env in
       match defining_expr with
-      | None -> acc, body
+      | None ->
+        (* If the defined variable has been seen at some point
+           it should have been replaced by now *)
+        let acc = Acc.remove_var_from_free_names var acc in
+        acc, body
       | Some defining_expr ->
         let var = VB.create var Name_mode.normal in
         Let_with_acc.create acc (Bindable_let_bound.singleton var) defining_expr
-          ~body ~free_names_of_body:Unknown
+          ~body
         |> Expr_with_acc.create_let
   in
   close_named acc env ~let_bound_var:var defining_expr cont
@@ -654,11 +661,11 @@ let close_switch acc env scrutinee (sw : IR.switch)
     in
     let acc, body =
       Let_with_acc.create acc (Bindable_let_bound.singleton comparison_result')
-        compare ~body:switch ~free_names_of_body:Unknown
+        compare ~body:switch
       |> Expr_with_acc.create_let
     in
     Let_with_acc.create acc (Bindable_let_bound.singleton untagged_scrutinee')
-      untag ~body ~free_names_of_body:Unknown
+      untag ~body
     |> Expr_with_acc.create_let
   | _, _ ->
     let acc, arms =
@@ -693,7 +700,7 @@ let close_switch acc env scrutinee (sw : IR.switch)
       in
       Let_with_acc.create acc
         (Bindable_let_bound.singleton untagged_scrutinee')
-        untag ~body ~free_names_of_body:Unknown
+        untag ~body
       |> Expr_with_acc.create_let
 
 external reraise : exn -> 'a = "%reraise"
@@ -837,7 +844,7 @@ let close_one_function acc ~external_env ~by_closure_id decl
         in
         Let_with_acc.create acc (Bindable_let_bound.singleton var)
           named
-          ~body ~free_names_of_body:Unknown
+          ~body
         |> Expr_with_acc.create_let)
       project_closure_to_bind
       (acc, body)
@@ -863,7 +870,6 @@ let close_one_function acc ~external_env ~by_closure_id decl
         Let_with_acc.create acc (Bindable_let_bound.singleton var)
           named
           ~body
-          ~free_names_of_body:Unknown
         |> Expr_with_acc.create_let)
       var_within_closures_to_bind
       (acc, body)
@@ -876,7 +882,6 @@ let close_one_function acc ~external_env ~by_closure_id decl
   let acc, body =
     Let_with_acc.create acc bound (Named.create_rec_info next_depth_expr)
       ~body
-      ~free_names_of_body:Unknown
     |> Expr_with_acc.create_let
   in
   let cost_metrics = Acc.cost_metrics acc in
@@ -903,7 +908,12 @@ let close_one_function acc ~external_env ~by_closure_id decl
       ~free_names_of_body:(Known (Acc.free_names acc))
   in
   let acc =
-    Acc.remove_continuation_from_free_names return_continuation acc
+    List.fold_left
+      (fun acc param ->
+         Acc.remove_var_from_free_names (Kinded_parameter.var param) acc)
+      acc params
+    |> Acc.remove_var_from_free_names my_closure
+    |> Acc.remove_continuation_from_free_names return_continuation
     |> Acc.remove_continuation_from_free_names
          (Exn_continuation.exn_handler exn_continuation)
   in
@@ -986,7 +996,12 @@ let close_functions acc external_env function_declarations =
       (acc, Closure_id.Map.empty, Acc.free_names acc)
       func_decl_list
   in
-  let acc = Acc.with_free_names free_names acc in
+  let acc =
+    Acc.with_free_names free_names acc
+    |> Closure_id.Map.fold (fun _ code_id acc ->
+        Acc.add_code_id_to_free_names ~code_id acc)
+        funs
+  in
   (* CR lmaurer: funs has arbitrary order (ultimately coming from
      function_declarations) *)
   let funs =
@@ -1056,8 +1071,7 @@ let close_let_rec acc env ~function_declarations
   let named = Named.create_set_of_closures set_of_closures in
   Let_with_acc.create acc
     (Bindable_let_bound.set_of_closures ~closure_vars)
-    named
-    ~body ~free_names_of_body:Unknown
+    named ~body
   |> Expr_with_acc.create_let
 
 let close_program ~backend ~module_ident ~module_block_size_in_words
@@ -1110,7 +1124,6 @@ let close_program ~backend ~module_ident ~module_block_size_in_words
         (Bindable_let_bound.symbols bound_symbols Syntactic)
         named
         ~body:return
-        ~free_names_of_body:Unknown
       |> Expr_with_acc.create_let
     in
     let block_access : P.Block_access_kind.t =
@@ -1135,7 +1148,6 @@ let close_program ~backend ~module_ident ~module_block_size_in_words
           (Bindable_let_bound.singleton var)
           named
           ~body
-          ~free_names_of_body:Unknown
         |> Expr_with_acc.create_let)
       (acc, body) (List.rev field_vars)
   in
@@ -1175,7 +1187,7 @@ let close_program ~backend ~module_ident ~module_block_size_in_words
         in
         Let_with_acc.create acc
           (Bindable_let_bound.symbols bound_symbols Syntactic)
-          defining_expr ~body ~free_names_of_body:Unknown
+          defining_expr ~body
         |> Expr_with_acc.create_let)
       (Acc.code acc)
       (acc, body)
@@ -1206,7 +1218,7 @@ let close_program ~backend ~module_ident ~module_block_size_in_words
       in
       Let_with_acc.create acc
         (Bindable_let_bound.symbols bound_symbols Syntactic)
-        defining_expr ~body ~free_names_of_body:Unknown
+        defining_expr ~body
       |> Expr_with_acc.create_let)
       (acc, body)
       (Acc.declared_symbols acc)

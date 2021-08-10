@@ -119,7 +119,6 @@ let raise_exn_for_failure acc ~dbg exn_cont exn_bucket extra_let_binding =
   | Some (bound_var, defining_expr) ->
     Let_with_acc.create acc (Bindable_let_bound.singleton bound_var)
       defining_expr ~body:apply_cont
-      ~free_names_of_body:Unknown
     |> Expr_with_acc.create_let
 
 let expression_for_failure acc ~backend exn_cont ~register_const_string
@@ -333,7 +332,6 @@ and bind_rec_primitive acc ~backend exn_cont ~register_const_string
       let acc, body = cont acc (Simple.var var) in
       Let_with_acc.create acc (Bindable_let_bound.singleton var') named
         ~body
-        ~free_names_of_body:Unknown
       |> Expr_with_acc.create_let
     in
     bind_rec acc ~backend exn_cont ~register_const_string p dbg cont

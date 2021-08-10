@@ -53,6 +53,8 @@ val must_be_set_of_closures : t -> Var_in_binding_pos.t list
 
 val must_be_symbols : t -> symbols
 
+val must_be_symbols_opt : t -> symbols option
+
 val name_mode : t -> Name_mode.t
 
 val with_name_mode : t -> Name_mode.t -> t

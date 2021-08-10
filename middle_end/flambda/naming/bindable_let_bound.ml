@@ -232,7 +232,12 @@ let must_be_symbols t =
   match t with
   | Symbols symbols -> symbols
   | Singleton _ | Set_of_closures _ ->
-    Misc.fatal_errorf "Bound name is not a [Set_of_closures]:@ %a" print t
+    Misc.fatal_errorf "Bound name is not a [Symbols]:@ %a" print t
+
+let must_be_symbols_opt t =
+  match t with
+  | Symbols symbols -> Some symbols
+  | Singleton _ | Set_of_closures _ -> None
 
 let exists_all_bound_vars t ~f =
   match t with

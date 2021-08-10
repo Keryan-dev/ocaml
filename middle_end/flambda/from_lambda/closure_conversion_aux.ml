@@ -245,11 +245,34 @@ module Acc = struct
   let add_free_names free_names t =
     { t with free_names = Name_occurrences.union free_names t.free_names; }
 
+
+  let add_name_to_free_names ~name t =
+    { t with
+      free_names =
+        Name_occurrences.add_name t.free_names
+          name Name_mode.normal;
+    }
+
+  let remove_code_id_or_symbol_from_free_names cis t =
+    { t with
+      free_names =
+        Name_occurrences.remove_code_id_or_symbol t.free_names cis;
+    }
+
   let add_symbol_to_free_names ~symbol t =
     { t with
       free_names =
         Name_occurrences.add_symbol t.free_names
           symbol Name_mode.normal;
+    }
+
+  let remove_symbol_from_free_names symbol t =
+    remove_code_id_or_symbol_from_free_names (Symbol symbol) t
+
+  let remove_var_from_free_names var t =
+    { t with
+      free_names =
+        Name_occurrences.remove_var t.free_names var;
     }
 
   let add_closure_var_to_free_names ~closure_var t =
@@ -271,6 +294,14 @@ module Acc = struct
       free_names =
         Name_occurrences.remove_continuation t.free_names cont;
     }
+
+  let add_code_id_to_free_names ~code_id t =
+    { t with
+      free_names =
+        Name_occurrences.add_code_id t.free_names code_id Name_mode.normal;
+    }
+  let remove_code_id_from_free_names code_id t =
+    remove_code_id_or_symbol_from_free_names (Code_id code_id) t
 
   let with_free_names free_names t =
     { t with free_names; }
@@ -457,7 +488,7 @@ module Apply_cont_with_acc = struct
 end
 
 module Let_with_acc = struct
-  let create acc let_bound named ~body ~free_names_of_body =
+  let create acc let_bound named ~body =
     let cost_metrics_of_defining_expr =
       match named with
       | Named.Prim (prim, _) ->
@@ -486,11 +517,32 @@ module Let_with_acc = struct
            ~cost_metrics_of_defining_expr)
         acc
     in
+    let free_names_of_body = Or_unknown.Known (Acc.free_names acc) in
+    let acc =
+      match Bindable_let_bound.must_be_symbols_opt let_bound with
+      | Some symbols ->
+        Code_id.Set.fold Acc.remove_code_id_from_free_names
+          (Bound_symbols.code_being_defined symbols.bound_symbols)
+          acc
+        |> Symbol.Set.fold Acc.remove_symbol_from_free_names
+             (Bound_symbols.being_defined symbols.bound_symbols)
+      | None ->
+        Bindable_let_bound.fold_all_bound_vars ~init:acc
+          ~f:(fun acc var ->
+              Acc.remove_var_from_free_names (Var_in_binding_pos.var var)
+                acc)
+          let_bound
+    in
     acc, Let.create let_bound named ~body ~free_names_of_body
 end
 
 module Continuation_handler_with_acc = struct
   let create acc parameters ~handler ~free_names_of_handler ~is_exn_handler =
+    let acc =
+      List.fold_left (fun acc param ->
+        Acc.remove_var_from_free_names (Kinded_parameter.var param) acc)
+        acc parameters
+    in
     acc,
     Continuation_handler.create parameters ~handler
       ~free_names_of_handler ~is_exn_handler

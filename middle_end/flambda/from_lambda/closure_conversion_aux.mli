@@ -143,12 +143,16 @@ module Acc : sig
 
   val add_free_names : Name_occurrences.t -> t -> t
   val add_symbol_to_free_names : symbol:Symbol.t -> t -> t
+  val remove_symbol_from_free_names : Symbol.t -> t -> t
+  val add_name_to_free_names : name:Name.t -> t -> t
+  val remove_var_from_free_names : Variable.t -> t -> t
   val add_closure_var_to_free_names : closure_var:Var_within_closure.t -> t -> t
   val add_continuation_to_free_names
     : cont:Continuation.t -> has_traps:bool -> t -> t
   val remove_continuation_from_free_names
     : Continuation.t -> t -> t
-
+  val add_code_id_to_free_names : code_id:Code_id.t -> t -> t
+  val remove_code_id_from_free_names : Code_id.t -> t -> t
 
   val with_free_names : Name_occurrences.t -> t -> t
 
@@ -254,7 +258,6 @@ module Let_with_acc : sig
     -> Bindable_let_bound.t
     -> Named.t
     -> body:Expr_with_acc.t
-    -> free_names_of_body:Name_occurrences.t Or_unknown.t
     -> Acc.t * Let.t
 end
 
