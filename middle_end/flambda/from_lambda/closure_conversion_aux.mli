@@ -76,6 +76,22 @@ end
     [Ident.t] values during closure conversion, and similarly for
      static exception identifiers. *)
 module Env : sig
+  type function_description = {
+    fd_code_id : Code_id.t;
+    fd_code : Flambda.Code.t;
+    fd_ret_cont : Continuation.t;
+    fd_exn_cont : Exn_continuation.t;
+    fd_params : Kinded_parameter.t list;
+    fd_body : Flambda.Expr.t;
+    fd_closure : Variable.t;
+    fd_depth : Variable.t;
+  }
+
+  type value_approximation =
+    | Value_unknown
+    | Closure_approximation of function_description
+    | Block_approximation of value_approximation array
+
   type t
 
   val empty : backend:(module Flambda_backend_intf.S) -> t
@@ -108,6 +124,15 @@ module Env : sig
   val add_simple_to_substitute_map : t -> Simple.t Ident.Map.t -> t
 
   val find_simple_to_substitute_exn : t -> Ident.t -> Simple.t
+
+  val add_value_approximation : t -> Name.t -> value_approximation -> t
+  val add_closure_approximation : t -> Name.t -> function_description -> t
+  val add_block_approximation : t -> Name.t -> value_approximation array -> t
+  val add_approximation_alias : t -> Name.t -> Name.t -> t
+  val find_value_approximation : t -> Simple.t -> value_approximation
+
+  val current_depth : t -> Variable.t option
+  val with_depth : t -> Variable.t -> t
 
   val backend : t -> (module Flambda_backend_intf.S)
   val current_unit_id : t -> Ident.t
@@ -147,12 +172,20 @@ module Acc : sig
   val add_name_to_free_names : name:Name.t -> t -> t
   val remove_var_from_free_names : Variable.t -> t -> t
   val add_closure_var_to_free_names : closure_var:Var_within_closure.t -> t -> t
+
   val add_continuation_to_free_names
-    : cont:Continuation.t -> has_traps:bool -> t -> t
+     : cont:Continuation.t
+    -> has_traps:bool
+    -> ?args_approx:(Env.value_approximation list)
+    -> t
+    -> t
   val remove_continuation_from_free_names
     : Continuation.t -> t -> t
   val add_code_id_to_free_names : code_id:Code_id.t -> t -> t
   val remove_code_id_from_free_names : Code_id.t -> t -> t
+
+  val continuation_known_arguments
+    : cont:Continuation.t -> t -> Env.value_approximation list option
 
   val with_free_names : Name_occurrences.t -> t -> t
 
@@ -241,6 +274,7 @@ module Apply_cont_with_acc : sig
   val create
      : Acc.t
     -> ?trap_action:Trap_action.t
+    -> ?args_approx:Env.value_approximation list
     -> Continuation.t
     -> args:Simple.t list
     -> dbg:Debuginfo.t
